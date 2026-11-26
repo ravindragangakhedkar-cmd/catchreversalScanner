@@ -255,6 +255,17 @@ app.post('/api/nubra/history',async(req,res)=>{
   } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra historical data request failed.'}); }
 });
 
+app.get('/api/nubra/current-price',async(req,res)=>{
+  try {
+    const instrument=typeof req.query.instrument==='string'?req.query.instrument.trim():'';
+    const exchange=typeof req.query.exchange==='string'?req.query.exchange:'NSE';
+    if(!instrument){res.status(400).json({error:'An instrument symbol is required.'});return;}
+    const params=new URLSearchParams({instrument,exchange});
+    res.setHeader('Cache-Control','no-store');
+    res.json(await nubraPythonFetch(`/v1/current-price?${params.toString()}`));
+  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra current-price request failed.'}); }
+});
+
 app.get('/api/nubra/option-chain',async(req,res)=>{
   try {
     const instrument=typeof req.query.instrument==='string'?req.query.instrument.trim():'';

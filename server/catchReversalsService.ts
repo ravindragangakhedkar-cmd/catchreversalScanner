@@ -106,7 +106,37 @@ export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], broker
       fields:['open','high','low','close','volume'],
       interval:'1d',intraDay:false,startDate,endDate
     }));
-    const payload=await postTimeseries(query,h);
+    let payload:any=null;
+    try {
+      payload=await postTimeseries(query,h);
+    } catch (batchError) {
+      const message=batchError instanceof Error ? batchError.message : String(batchError);
+      // A single unsupported ticker must not discard the other four valid instruments.
+      // Keep authentication/server failures visible; isolate only Nubra's ticker lookup error.
+      if (!/ticker not found/i.test(message)) throw batchError;
+      for (const entry of group) {
+        const singleQuery=[{
+          exchange:entry.symbol==='SENSEX'?'BSE':'NSE',
+          type:entry.isIndex?'INDEX':'STOCK',
+          values:[entry.symbol],
+          fields:['open','high','low','close','volume'],
+          interval:'1d',intraDay:false,startDate,endDate
+        }];
+        try {
+          const singlePayload=await postTimeseries(singleQuery,h);
+          const bars=extractBars(singlePayload,entry.symbol);
+          if(bars.length) output.set(entry.symbol,bars.map(b=>({
+            date:new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}),
+            timestamp:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume
+          })));
+        } catch (singleError) {
+          const detail=singleError instanceof Error ? singleError.message : String(singleError);
+          if (/HTTP 440|HTTP 401|HTTP 403|session expired|authentication/i.test(detail)) throw singleError;
+          console.warn(`[Bias MTF] Nubra skipped unsupported ticker ${entry.symbol}: ${detail}`);
+        }
+      }
+      continue;
+    }
     for(const entry of group){
       const bars=extractBars(payload,entry.symbol);
       if(bars.length) output.set(entry.symbol,bars.map(b=>({

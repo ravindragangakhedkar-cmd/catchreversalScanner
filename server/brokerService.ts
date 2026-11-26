@@ -67,8 +67,20 @@ export async function initiateBrokerLogin(
   });
   if (!response.ok) throw new Error(`Nubra OTP request failed (HTTP ${response.status}). Check the registered mobile number and try again.`);
   const result = await response.json() as { temp_token?: string; token?: string };
-  const tempToken = result.temp_token || result.token;
-  if (!tempToken) throw new Error('Nubra did not return an OTP challenge token. Please try again.');
+  const firstTempToken = result.temp_token || result.token;
+  if (!firstTempToken) throw new Error('Nubra did not return the initial OTP token. Please try again.');
+
+  // REST API V3 requires a second sendphoneotp call with the first temp token.
+  // The latest temp_token from this call is the one used to verify the SMS OTP.
+  const otpSendResponse = await fetch(`${getSafeNubraBaseUrl()}/sendphoneotp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-temp-token': firstTempToken, 'x-device-id': deviceId },
+    body: JSON.stringify({ phone: mobile }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!otpSendResponse.ok) throw new Error(`Nubra OTP dispatch failed (HTTP ${otpSendResponse.status}). Please retry the connection.`);
+  const otpSendResult = await otpSendResponse.json() as { temp_token?: string; token?: string };
+  const tempToken = otpSendResult.temp_token || otpSendResult.token || firstTempToken;
 
   const challenge: PendingChallenge = {
     challengeId, userId, mobile, mpin, maskedMobile, mode: 'live-api', provider: 'nubra',
@@ -97,22 +109,21 @@ export async function verifyBrokerOtp(
     body: JSON.stringify({ phone: challenge.mobile, otp }), signal: AbortSignal.timeout(7000),
   });
   if (!otpResponse.ok) throw new Error('Nubra rejected the OTP. Please verify the code received on your mobile and try again.');
-  const otpResult = await otpResponse.json() as { temp_token?: string; auth_token?: string; session_token?: string; token?: string };
-  const nextToken = otpResult.temp_token || otpResult.auth_token || challenge.nubraTempToken;
-  let authToken = otpResult.session_token || otpResult.auth_token;
+  const otpResult = await otpResponse.json() as { auth_token?: string; session_token?: string; token?: string };
+  const otpAuthToken = otpResult.auth_token || otpResult.token;
+  if (!otpAuthToken) throw new Error('Nubra OTP verification did not return the temporary auth_token required for MPIN verification.');
 
-  // Nubra MPIN verification remains mandatory when OTP response is not already a session.
-  if (!authToken) {
-    const pinResponse = await fetch(`${getSafeNubraBaseUrl()}/verifypin`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-temp-token': nextToken, 'x-device-id': challenge.nubraDeviceId },
-      body: JSON.stringify({ pin: challenge.mpin }), signal: AbortSignal.timeout(7000),
-    });
-    if (!pinResponse.ok) throw new Error('Nubra rejected the 4-digit MPIN. Please check it and reconnect.');
-    const pinResult = await pinResponse.json() as { session_token?: string; auth_token?: string; token?: string };
-    authToken = pinResult.session_token || pinResult.auth_token || pinResult.token;
-  }
-  if (!authToken) throw new Error('Nubra did not return an authenticated session after OTP and MPIN verification.');
+  // REST API V3: verify MPIN with the OTP auth_token as Bearer credentials.
+  // Only the session_token returned by /verifypin is valid for market-data calls.
+  const pinResponse = await fetch(`${getSafeNubraBaseUrl()}/verifypin`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${otpAuthToken}`, 'x-device-id': challenge.nubraDeviceId },
+    body: JSON.stringify({ pin: challenge.mpin }), signal: AbortSignal.timeout(10000),
+  });
+  if (!pinResponse.ok) throw new Error(`Nubra MPIN verification failed (HTTP ${pinResponse.status}). Please reconnect and verify your MPIN.`);
+  const pinResult = await pinResponse.json() as { session_token?: string };
+  const authToken = pinResult.session_token;
+  if (!authToken) throw new Error('Nubra MPIN verification did not return the final session_token. Please reconnect.');
 
   const connectedAtIso = new Date().toISOString();
   const active: ActiveBrokerSession = {

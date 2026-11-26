@@ -191,26 +191,30 @@ def historical(request: HistoricalRequest):
                             results[str(symbol).strip().upper()] = bars
         except Exception as exc:
             # Isolate unsupported symbols so one bad symbol never discards a batch.
-            if len(symbols) > 1:
-                for symbol in symbols:
-                    try:
-                        single = dict(query)
-                        single["values"] = [symbol]
-                        one = md.historical_data(single)
-                        found = False
-                        for group in (_attr(one, "result", []) or []):
-                            for instrument_dict in (_attr(group, "values", []) or []):
-                                if isinstance(instrument_dict, dict) and symbol in instrument_dict:
-                                    bars = _chart_to_bars(instrument_dict[symbol])
-                                    if bars:
-                                        results[symbol] = bars
-                                        found = True
-                        if not found:
-                            failures[symbol] = "Nubra returned no historical candles."
-                    except Exception as single_exc:
-                        failures[symbol] = f"{type(single_exc).__name__}: {single_exc}"
-            else:
+            if len(symbols) == 1:
                 failures[symbols[0]] = f"{type(exc).__name__}: {exc}"
+
+        # Some SDK responses can succeed for a batch but omit one unsupported symbol.
+        # Retry every missing symbol individually, preserving all valid instruments.
+        for symbol in symbols:
+            if symbol in results:
+                continue
+            try:
+                single = dict(query)
+                single["values"] = [symbol]
+                one = md.historical_data(single)
+                found = False
+                for group in (_attr(one, "result", []) or []):
+                    for instrument_dict in (_attr(group, "values", []) or []):
+                        if isinstance(instrument_dict, dict) and symbol in instrument_dict:
+                            bars = _chart_to_bars(instrument_dict[symbol])
+                            if bars:
+                                results[symbol] = bars
+                                found = True
+                if not found:
+                    failures[symbol] = "Nubra returned no historical candles."
+            except Exception as single_exc:
+                failures[symbol] = f"{type(single_exc).__name__}: {single_exc}"
 
     return {
         "items": results,

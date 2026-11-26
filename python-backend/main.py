@@ -429,3 +429,24 @@ def option_chain(instrument: str, exchange: str = "NSE", expiry: str | None = No
         }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nubra option chain failed: {type(exc).__name__}: {exc}") from exc
+
+
+@app.get("/v1/current-price", dependencies=[Depends(_authorize)])
+def current_price(instrument: str, exchange: str = "NSE"):
+    if exchange not in {"NSE", "BSE", "MCX"}:
+        raise HTTPException(status_code=400, detail="exchange must be NSE, BSE or MCX.")
+    try:
+        from nubra_python_sdk.marketdata.market_data import MarketData
+        md = MarketData(_get_sdk())
+        result = md.current_price(instrument.strip().upper(), exchange=exchange)
+        return {
+            "instrument": instrument.strip().upper(),
+            "exchange": exchange,
+            "message": _json_value(_attr(result, "message")),
+            "price": _json_value(_attr(result, "price")),
+            "previous_close": _json_value(_attr(result, "prev_close")),
+            "change_percent": _json_value(_attr(result, "change")),
+            "timestamp": _json_value(_attr(result, "timestamp")),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nubra current-price request failed: {type(exc).__name__}: {exc}") from exc

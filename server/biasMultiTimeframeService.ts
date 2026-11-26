@@ -1,6 +1,6 @@
 import { computeMarketBias, computeTwinRangeFilter } from '../shared/indicators.ts';
 import { INDEX_BASKET_UNIVERSE, NIFTY_500_FNO_UNIVERSE, type StockUniverseEntry } from '../shared/nifty500Universe.ts';
-import { fetchNubraChartFresh } from './marketDataService.ts';
+import { fetchDailyBarsForBias } from './catchReversalsService.ts';
 
 type Bar = { date: string; timestamp: number; open: number; high: number; low: number; close: number; volume: number };
 type Row = {
@@ -91,13 +91,15 @@ export async function getBiasMultiTimeframe(brokerToken?: string) {
   const universe = [...NIFTY_500_FNO_UNIVERSE.filter((entry) => entry.isFno), ...INDEX_BASKET_UNIVERSE];
   const results: Row[] = [];
   const failures: Array<{ symbol: string; reason: string }> = [];
+  // Critical: use the same Nubra batch request, response parser, and timestamp handling
+  // as Catch Reversals, which is already connected to this user's working broker session.
+  const dailyBarsBySymbol = await fetchDailyBarsForBias(universe, brokerToken);
   const batchSize = 5;
   for (let start = 0; start < universe.length; start += batchSize) {
     const batch = universe.slice(start, start + batchSize);
     const settled = await Promise.allSettled(batch.map(async (entry) => {
-      const chart = await fetchNubraChartFresh(entry, '1y', '1d', brokerToken, 400);
-      if (!chart?.bars?.length) throw new Error('Nubra returned no daily candles');
-      const daily = chart.bars as Bar[];
+      const daily = dailyBarsBySymbol.get(entry.symbol) as Bar[] | undefined;
+      if (!daily?.length) throw new Error('Nubra batch response contained no candles for this symbol');
       const weekly = weeklyBars(daily);
       if (daily.length < 60) throw new Error(`Insufficient daily candles (${daily.length})`);
       if (weekly.length < 40) throw new Error(`Insufficient weekly candles for Market Bias period 40 (${weekly.length})`);
@@ -115,7 +117,7 @@ export async function getBiasMultiTimeframe(brokerToken?: string) {
       const closes = daily.map((b) => b.close);
       return {
         symbol: entry.symbol, name: entry.companyName,
-        price: round2(chart.regularMarketPrice && chart.regularMarketPrice > 0 ? chart.regularMarketPrice : daily[last].close),
+        price: round2(daily[last].close),
         weeklyTrend, dailyTrend,
         jointStatus: weeklyTrend === dailyTrend ? 'Aligned' as const : 'Divergent' as const,
         twinRangeStatus, rsi: round2(rsi(closes)), adx: round2(adx(daily)), chop: round2(choppiness(daily)),

@@ -66,7 +66,13 @@ function extractBars(payload:any, symbol:string):Bar[] {
 }
 async function postTimeseries(query:any[], authHeaders:Record<string,string>):Promise<any> {
   const r=await fetch(`${NUBRA_BASE}/charts/timeseries`,{method:'POST',headers:authHeaders,body:JSON.stringify({query}),cache:'no-store',signal:AbortSignal.timeout(18000)});
-  if(!r.ok) throw new Error(`Nubra timeseries HTTP ${r.status}`); return r.json();
+  if (r.status === 440) throw new Error('Nubra session expired or invalid (HTTP 440). Reconnect Nubra using your mobile OTP and MPIN, then run the scanner again.');
+  if (r.status === 401 || r.status === 403) throw new Error(`Nubra authentication was rejected (HTTP ${r.status}). Reconnect Nubra and retry.`);
+  if (!r.ok) {
+    const detail = (await r.text().catch(() => '')).slice(0, 300);
+    throw new Error(`Nubra timeseries HTTP ${r.status}${detail ? ': ' + detail : ''}`);
+  }
+  return r.json();
 }
 async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promise<any|null>{
   const exchange=entry.symbol==='SENSEX'?'BSE':'NSE';

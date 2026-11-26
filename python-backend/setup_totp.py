@@ -18,7 +18,8 @@ def main():
     print("\nNubra TOTP secret (keep private):")
     print(secret)
     print("\nNow enable TOTP. Follow the SDK prompts and enter the authenticator code.")
-    client.totp_enable()
+    enable_client = InitNubraSdk(NubraEnv.PROD)
+    enable_client.totp_enable()
     print("\nTOTP setup completed. Add PHONE_NO, MPIN and this TOTP secret to Render.")
     try:
         enable_client.logout()

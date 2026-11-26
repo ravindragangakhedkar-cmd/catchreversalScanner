@@ -91,7 +91,7 @@ export async function getBiasMultiTimeframe(brokerToken?: string) {
   const universe = [...NIFTY_500_FNO_UNIVERSE.filter((entry) => entry.isFno), ...INDEX_BASKET_UNIVERSE];
   const results: Row[] = [];
   const failures: Array<{ symbol: string; reason: string }> = [];
-  const batchSize = 3;
+  const batchSize = 5;
   for (let start = 0; start < universe.length; start += batchSize) {
     const batch = universe.slice(start, start + batchSize);
     const settled = await Promise.allSettled(batch.map(async (entry) => {
@@ -106,7 +106,12 @@ export async function getBiasMultiTimeframe(brokerToken?: string) {
       const twin = computeTwinRangeFilter(daily.map((b) => b.close));
       const last = daily.length - 1;
       const fresh = twin.signals[last];
-      const twinRangeStatus = fresh === 'BUY' ? 'Long' : fresh === 'SELL' ? 'Short' : 'No fresh signal';
+      // Only publish a Twin Range entry when it agrees with the Daily Market Bias direction.
+      const twinRangeStatus = fresh === 'BUY' && dailyTrend === 'Bullish'
+        ? 'Long'
+        : fresh === 'SELL' && dailyTrend === 'Bearish'
+          ? 'Short'
+          : 'No fresh signal';
       const closes = daily.map((b) => b.close);
       return {
         symbol: entry.symbol, name: entry.companyName,

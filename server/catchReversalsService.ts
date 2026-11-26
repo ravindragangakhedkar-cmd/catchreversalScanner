@@ -56,13 +56,43 @@ function chopApprox(bars:Bar[],p=10):number {
   const w=bars.slice(-p),hi=Math.max(...w.map(x=>x.high)),lo=Math.min(...w.map(x=>x.low));
   return hi>lo&&trSum>0?100*Math.log10(trSum/(hi-lo))/Math.log10(p):50;
 }
+function toEpochMilliseconds(raw:unknown):number|null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  let value:number;
+  if (typeof raw === 'number') value=raw;
+  else {
+    const text=String(raw).trim();
+    const numeric=Number(text);
+    value=Number.isFinite(numeric) && text!=='' ? numeric : Date.parse(text);
+  }
+  if (!Number.isFinite(value) || value<=0) return null;
+  // Nubra payloads may express candle time as seconds, milliseconds,
+  // microseconds, nanoseconds, or an ISO-8601 date string.
+  if (value >= 1e17) value=Math.floor(value/1e6);
+  else if (value >= 1e14) value=Math.floor(value/1e3);
+  else if (value < 1e11) value=Math.floor(value*1000);
+  else value=Math.floor(value);
+  return Number.isFinite(value) && Number.isFinite(new Date(value).getTime()) ? value : null;
+}
 function extractBars(payload:any, symbol:string):Bar[] {
   const root=payload?.result?.find?.((r:any)=>r?.values?.some?.((v:any)=>v?.[symbol])) ?? payload?.result?.[0];
   const values=root?.values?.find?.((v:any)=>v?.[symbol])?.[symbol] ?? root?.values?.[0]?.[symbol];
-  const get=(key:string):Tick[]=>Array.isArray(values?.[key])?values[key]:[];
+  const get=(key:string):any[]=>Array.isArray(values?.[key])?values[key]:[];
   const map=new Map<number,Partial<Bar>>();
-  for(const key of ['open','high','low','close','volume']) for(const t of get(key)){const ts=Number(t.ts);const row=map.get(ts)??{ts};(row as any)[key]=Number(t.v)/100;map.set(ts,row);}
-  return [...map.values()].filter((b:any)=>b.open&&b.high&&b.low&&b.close).map((b:any)=>({ts:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume??0})).sort((a,b)=>a.ts-b.ts);
+  for(const key of ['open','high','low','close','volume']) {
+    for(const point of get(key)) {
+      const ts=toEpochMilliseconds(point?.ts ?? point?.timestamp ?? point?.time ?? point?.date);
+      const rawValue=Number(point?.v ?? point?.value);
+      if(ts===null || !Number.isFinite(rawValue)) continue;
+      const row=map.get(ts)??{ts};
+      (row as any)[key]=rawValue/100;
+      map.set(ts,row);
+    }
+  }
+  return [...map.values()]
+    .filter((b:any)=>Number.isFinite(b.ts)&&Number.isFinite(b.open)&&Number.isFinite(b.high)&&Number.isFinite(b.low)&&Number.isFinite(b.close)&&b.open>0&&b.high>0&&b.low>0&&b.close>0)
+    .map((b:any)=>({ts:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:Number.isFinite(b.volume)?b.volume:0}))
+    .sort((a,b)=>a.ts-b.ts);
 }
 async function postTimeseries(query:any[], authHeaders:Record<string,string>):Promise<any> {
   const r=await fetch(`${NUBRA_BASE}/charts/timeseries`,{method:'POST',headers:authHeaders,body:JSON.stringify({query}),cache:'no-store',signal:AbortSignal.timeout(18000)});

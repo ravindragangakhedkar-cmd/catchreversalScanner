@@ -1,6 +1,6 @@
 import { computeEMA, computeMarketBias, computeTwinRangeFilter } from '../shared/indicators.ts';
 import { INDEX_BASKET_UNIVERSE, NIFTY_500_FNO_UNIVERSE, type StockUniverseEntry } from '../shared/nifty500Universe.ts';
-import { getBrokerSessionByToken } from './brokerService.ts';
+import { getNubraCredentialsForSession } from './brokerService.ts';
 import { getIstTradingDate, getLastCompletedWeekdayDate } from './marketDates.ts';
 
 const BASE = process.env.NUBRA_API_BASE_URL?.trim() || 'https://api.nubra.io';
@@ -20,9 +20,9 @@ function extract(payload:any,symbol:string):Bar[]{const root=payload?.result?.fi
 async function fetchBatch(entries:StockUniverseEntry[],token:string,device:string,start:string,end:string){const h:Record<string,string>={Accept:'application/json','Content-Type':'application/json',Authorization:`Bearer ${token}`};if(device)h['x-device-id']=device;const query=entries.map(e=>({exchange:e.symbol==='SENSEX'?'BSE':'NSE',type:e.isIndex?'INDEX':'STOCK',values:[e.symbol],fields:['open','high','low','close','volume'],interval:'1d',intraDay:false,startDate:start,endDate:end}));const r=await fetch(`${BASE}/charts/timeseries`,{method:'POST',headers:h,body:JSON.stringify({query}),cache:'no-store',signal:AbortSignal.timeout(20000)});if(!r.ok)throw new Error(`Nubra historical candles returned HTTP ${r.status}`);return r.json();}
 function toWeekly(bars:Bar[]){const map=new Map<string,Bar[]>();for(const b of bars){const d=new Date(b.timestamp);const day=(d.getUTCDay()+6)%7;d.setUTCDate(d.getUTCDate()-day);const key=d.toISOString().slice(0,10);const a=map.get(key)??[];a.push(b);map.set(key,a);}return [...map.values()].map(a=>({date:a[0].date,timestamp:a[0].timestamp,open:a[0].open,high:Math.max(...a.map(x=>x.high)),low:Math.min(...a.map(x=>x.low)),close:a.at(-1)!.close,volume:a.reduce((s,x)=>s+x.volume,0)}));}
 export async function getBiasMultiTimeframe(brokerToken?:string){
- const session=await getBrokerSessionByToken(brokerToken);
- if(!session?.connected||session.provider!=='nubra'||!session.nubraLiveAuth)throw new Error('Connect your live Nubra Finance account before scanning.');
- const token=session.nubraLiveAuth.authToken,device=session.nubraLiveAuth.deviceId??'';
+ const credentials=await getNubraCredentialsForSession(brokerToken);
+ if(!credentials.authToken)throw new Error('Connect your live Nubra Finance account before scanning.');
+ const token=credentials.authToken,device=credentials.deviceId??'';
  const universe=[...NIFTY_500_FNO_UNIVERSE.filter(x=>x.isFno),...INDEX_BASKET_UNIVERSE];
  const end=new Date().toISOString(),start=new Date(Date.now()-900*86400000).toISOString();
  const rows:Row[]=[];let failed=0;

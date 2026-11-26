@@ -183,10 +183,10 @@ export function computePVOSeries(bars: OhlcvBar[]): {
  * Market Bias (CEREBR by Professor X):
  * Period = 100, Smoothing = 50, Oscillator Period = 7, Show HA Candles = Disabled
  */
-export function computeMarketBias(bars: OhlcvBar[]) {
-  const period = 100;
-  const smoothing = 50;
-  const oscPeriod = 7;
+export function computeMarketBias(bars: OhlcvBar[], settings: { period?: number; smoothing?: number; oscPeriod?: number } = {}) {
+  const period = settings.period ?? 100;
+  const smoothing = settings.smoothing ?? 50;
+  const oscPeriod = settings.oscPeriod ?? 7;
 
   const opens = bars.map((b) => b.open);
   const highs = bars.map((b) => b.high);

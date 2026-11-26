@@ -78,6 +78,61 @@ async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promi
   const selected=await fetch(`${base}&expiry=${expiry}`,{headers:h,cache:'no-store',signal:AbortSignal.timeout(12000)});
   if(!selected.ok)return null; const result=await selected.json() as Chain; return result.chain??null;
 }
+/**
+ * Daily-level watchlist deliberately does not depend on option-chain availability.
+ * It uses the latest completed daily close and the prior completed candle's classic pivots.
+ */
+async function fetchDailyWatchlist(entries:StockUniverseEntry[], h:Record<string,string>, historyStart:string, historyEnd:string, sessionIsoDate:string):Promise<CatchReversalRow[]> {
+  const out:CatchReversalRow[]=[];
+  for(const group of chunks(entries,BATCH_SIZE)){
+    const query=[{
+      exchange:group.some(x=>x.symbol==='SENSEX')?'BSE':'NSE',
+      type:'STOCK',
+      values:group.map(x=>x.symbol),
+      fields:['open','high','low','close','volume'],
+      interval:'1d',intraDay:false,startDate:historyStart,endDate:historyEnd
+    }];
+    let data:any;
+    try{data=await postTimeseries(query,h);}catch{continue;}
+    for(const entry of group){
+      const bars=extractBars(data,entry.symbol)
+        .filter(b=>new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})<=sessionIsoDate);
+      if(bars.length<2)continue;
+      const latest=bars.at(-1)!;
+      const previous=bars.at(-2)!;
+      const spot=latest.close;
+      if(!(spot>0))continue;
+      const levels=pivots(previous);
+      const nearest=Object.entries(levels)
+        .map(([level,value])=>({level,value,distance:Math.abs(spot-value)/spot}))
+        .sort((a,b)=>a.distance-b.distance)[0];
+      if(!nearest||nearest.distance>0.0125)continue;
+      const support=nearest.value<spot||(nearest.level==='PP'&&spot>=nearest.value);
+      const closes=bars.map(b=>b.close);
+      const bb=computeBBWPSeries(closes);
+      const bbwp=bb.at(-1)??0;
+      const bbwpSma=bb.slice(-9).reduce((a,b)=>a+b,0)/Math.max(1,Math.min(9,bb.length));
+      const e9=computeEMA(closes,9),e14=computeEMA(closes,14);
+      const liveRsi=rsi(closes);
+      const previousRsi=rsi(closes.slice(0,-1));
+      const adx=adxApprox(bars),previousAdx=adxApprox(bars.slice(0,-1));
+      const chop=chopApprox(bars),previousChop=chopApprox(bars.slice(0,-1));
+      out.push({
+        symbol:entry.symbol,name:entry.companyName,isIndex:Boolean(entry.isIndex),underlying:spot,
+        reversal:support?'Near Daily Support · Watch':'Near Daily Resistance · Watch',
+        level:nearest.level,distancePercent:nearest.distance*100,
+        callChange:null,putChange:null,
+        emaCross:support?(e9.at(-1)!>e14.at(-1)!?'Done':'Pending'):(e9.at(-1)!<e14.at(-1)!?'Done':'Pending'),
+        bbwp,bbwpStatus:bbwp<bbwpSma?'Below 9 SMA · Fading':Math.abs(bbwp-bbwpSma)<=1?'At 9 SMA · Fading':'Fading expansion',
+        rsi:liveRsi,rsiDelta:liveRsi-previousRsi,adx,adxDelta:adx-previousAdx,chop,chopDelta:chop-previousChop,
+        chartUrl:`https://www.tradingview.com/chart/?symbol=${entry.symbol==='SENSEX'?'BSE:SENSEX':`NSE:${entry.symbol}`}`,
+        geminiAnalysis:'Awaiting Gemini analysis'
+      });
+    }
+  }
+  return out;
+}
+
 async function fetchGroup(entries:StockUniverseEntry[], h:Record<string,string>, marketOpen:boolean, sessionRange:{start:string;end:string;nextDay:string}, historyStart:string, historyEnd:string, sessionIsoDate:string):Promise<CatchReversalRow[]> {
   // Exactly five instruments or fewer are requested concurrently in each group.
   const chains=await Promise.all(entries.map(async e=>({entry:e,chain:await getChain(e,h)})));
@@ -139,9 +194,14 @@ export async function getCatchReversals(brokerToken?:string){
   if(!creds.authToken) throw new Error('Connect Nubra Finance first to scan live option and market data.');
   const h=headers(creds.authToken,creds.deviceId);
   const universe=[...NIFTY_500_FNO_UNIVERSE.filter(x=>x.isFno),...INDEX_BASKET_UNIVERSE];
-  const all:CatchReversalRow[]=[];
-  for(const group of chunks(universe,BATCH_SIZE)){ all.push(...await fetchGroup(group,h,clock.isOpen,sessionRange,historyStart,historyEnd,sessionIsoDate)); }
+  // Always build the near-level watchlist from daily candles first; it has no option-chain dependency.
+  const watchRows=await fetchDailyWatchlist(universe,h,historyStart,historyEnd,sessionIsoDate);
+  const confirmedRows:CatchReversalRow[]=[];
+  for(const group of chunks(universe,BATCH_SIZE)){ confirmedRows.push(...await fetchGroup(group,h,clock.isOpen,sessionRange,historyStart,historyEnd,sessionIsoDate)); }
+  // Confirmed bounce/rejection rows take precedence over watchlist rows for the same instrument.
+  const confirmedSymbols=new Set(confirmedRows.map(row=>row.symbol));
+  const all=[...confirmedRows,...watchRows.filter(row=>!confirmedSymbols.has(row.symbol))];
   // Expiry is selected per underlying from Nubra's actual monthly contract calendar.
-  const firstChain=await getChain(universe[0],h); const expiry=firstChain?.expiry??getNextMonthlyExpiry(firstChain?.all_expiries??[]);
-  return {items:all,clock,expiry,tradingDate,batchSize:BATCH_SIZE,universeCount:universe.length,loadedCount:all.length};
+  const firstChain=await getChain(universe[0],h); const expiry=firstChain?.expiry??getNextMonthlyExpiry(firstChain?.chain?.all_expiries??[]);
+  return {items:all,clock,expiry,tradingDate,batchSize:BATCH_SIZE,universeCount:universe.length,loadedCount:all.length,watchlistCount:watchRows.length,confirmedCount:confirmedRows.length};
 }

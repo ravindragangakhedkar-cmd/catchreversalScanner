@@ -11,6 +11,7 @@ import {
   scanCustomNseSymbol,
 } from './server/marketDataService.ts';
 import { getCatchReversals } from './server/catchReversalsService.ts';
+import { getBiasMultiTimeframe } from './server/biasMultiTimeframeService.ts';
 import {
   getScannedOptionCallShortCovering,
   getScannedOptionPutShortCovering,
@@ -193,6 +194,22 @@ app.get('/api/market/scan-super-pivots', async (req, res) => {
     res.status(500).json({
       error: err instanceof Error ? err.message : 'Failed to scan Super Pivots.',
     });
+  }
+});
+
+// Bias Multi Time Frame — Weekly/Daily Market Bias CEREBR + Daily Twin Range
+app.get('/api/market/scan-bias-mtf', async (req, res) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    const token = extractBrokerToken(req);
+    const session = await getBrokerSessionByToken(token);
+    if (!session?.connected || session.provider !== 'nubra' || !session.nubraLiveAuth) {
+      res.status(401).json({ error: 'Connect a live Nubra Finance session on Broker Connect before running Bias Multi Time Frame.' });
+      return;
+    }
+    res.json(await getBiasMultiTimeframe(token));
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : 'Bias Multi Time Frame scan failed.' });
   }
 });
 

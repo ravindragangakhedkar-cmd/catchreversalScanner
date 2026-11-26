@@ -201,13 +201,9 @@ app.get('/api/market/scan-super-pivots', async (req, res) => {
 app.get('/api/market/scan-bias-mtf', async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    const token = extractBrokerToken(req);
-    const session = await getBrokerSessionByToken(token);
-    if (!session?.connected || session.provider !== 'nubra' || !session.nubraLiveAuth) {
-      res.status(401).json({ error: 'Connect a live Nubra Finance session on Broker Connect before running Bias Multi Time Frame.' });
-      return;
-    }
-    res.json(await getBiasMultiTimeframe(token));
+    // Bias MTF uses the separately authenticated Nubra Python SDK service.
+    // It does not depend on the browser's REST-session token.
+    res.json(await getBiasMultiTimeframe());
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message : 'Bias Multi Time Frame scan failed.' });
   }

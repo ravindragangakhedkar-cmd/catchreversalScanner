@@ -109,36 +109,63 @@ async function postTimeseries(query:any[], _authHeaders:Record<string,string>):P
   const serviceUrl=process.env.NUBRA_PYTHON_API_URL?.trim();
   const serviceKey=process.env.NUBRA_PYTHON_API_KEY?.trim();
   if(!serviceUrl||!serviceKey) throw new Error('Nubra Python SDK service is not configured. Set NUBRA_PYTHON_API_URL and NUBRA_PYTHON_API_KEY in Vercel.');
-  const instruments=query.flatMap((q:any)=>Array.isArray(q.values)?q.values.map((symbol:string)=>({
-    symbol,exchange:q.exchange==='BSE'?'BSE':'NSE',instrument_type:q.type==='INDEX'?'INDEX':'STOCK'
-  })):[]);
-  if(!instruments.length) throw new Error('No instruments were supplied to the Nubra Python SDK service.');
-  if(instruments.length>5) throw new Error('Nubra Python SDK requests are limited to five instruments per batch.');
-  const first=query[0];
-  const response=await fetch(`${serviceUrl.replace(/\\/$/,'')}/v1/historical`,{
-    method:'POST',
-    headers:{'Content-Type':'application/json','x-service-key':serviceKey},
-    body:JSON.stringify({instruments,start_date:first.startDate,end_date:first.endDate,interval:first.interval??'1d'}),
-    cache:'no-store',signal:AbortSignal.timeout(60000)
-  });
-  if(!response.ok){
-    const detail=(await response.text().catch(()=>'' )).slice(0,500);
-    throw new Error(`Nubra Python SDK service HTTP ${response.status}${detail?': '+detail:''}`);
+  const result:any[]=[];
+  const base=serviceUrl.replace(/\/$/,'');
+  const requestGroup=async(q:any,symbols:string[])=>{
+    const fields=(Array.isArray(q.fields)?q.fields:['open','high','low','close','volume']).map((x:string)=>x==='volume'?'cumulative_volume':x);
+    const response=await fetch(`${base}/v1/history`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-service-key':serviceKey},
+      body:JSON.stringify({
+        exchange:q.exchange??'NSE',
+        instrument_type:q.type??'STOCK',
+        symbols,
+        fields,
+        start_date:q.startDate,
+        end_date:q.endDate,
+        interval:q.interval??'1d',
+        intraday:Boolean(q.intraDay),
+        realtime:Boolean(q.realTime)
+      }),
+      cache:'no-store',signal:AbortSignal.timeout(60000)
+    });
+    const text=await response.text();
+    let payload:any={};
+    try{payload=text?JSON.parse(text):{};}catch{payload={detail:text.slice(0,400)};}
+    if(!response.ok) throw new Error(payload.detail||`Nubra Python SDK HTTP ${response.status}`);
+    const values:any[]=[];
+    for(const symbol of symbols){
+      const series=payload.items?.[symbol.toUpperCase()]??{};
+      const mapped:any={};
+      for(const [field,points] of Object.entries(series) as Array<[string,any[]]>){
+        const outputField=field==='cumulative_volume'?'volume':field;
+        mapped[outputField]=(points??[]).map(point=>({
+          ts:point.timestamp,
+          // Keep the legacy parser's native-unit contract: prices and volume
+          // are converted back to paise/native units; OI and Greeks stay unchanged.
+          v:['open','high','low','close','volume'].includes(outputField)?Number(point.value)*100:Number(point.value)
+        }));
+      }
+      if(Object.keys(mapped).length) values.push({[symbol.toUpperCase()]:mapped});
+    }
+    if(values.length) result.push({exchange:q.exchange??'NSE',type:q.type??'STOCK',values});
+  };
+  for(const q of query){
+    const symbols=Array.isArray(q.values)?q.values.map((x:string)=>String(x).trim().toUpperCase()).filter(Boolean):[];
+    if(!symbols.length) continue;
+    if(symbols.length>5) throw new Error('Nubra supports at most five instruments per historical request.');
+    try{
+      await requestGroup(q,symbols);
+    }catch(batchError){
+      if(symbols.length===1) throw batchError;
+      // A failed option contract must not discard its valid pair or other symbols.
+      for(const symbol of symbols){
+        try{await requestGroup(q,[symbol]);}
+        catch(singleError){console.warn(`[Nubra Python SDK] Skipped ${symbol}: ${singleError instanceof Error?singleError.message:String(singleError)}`);}
+      }
+    }
   }
-  const payload=await response.json() as {items?:Record<string,Array<{timestamp:number;open:number;high:number;low:number;close:number;volume:number}>>;failures?:Record<string,string>};
-  const values:any[]=[];
-  for(const instrument of instruments){
-    const symbol=instrument.symbol.toUpperCase();
-    const bars=payload.items?.[symbol]??[];
-    if(!bars.length) continue;
-    const series=(field:'open'|'high'|'low'|'close'|'volume')=>bars.map(b=>({ts:b.timestamp,v:field==='volume'?b.volume*100:b[field]*100}));
-    values.push({[symbol]:{open:series('open'),high:series('high'),low:series('low'),close:series('close'),volume:series('volume')}});
-  }
-  if(!values.length){
-    const details=Object.entries(payload.failures??{}).map(([symbol,reason])=>`${symbol}: ${reason}`).join(' | ');
-    throw new Error(`Nubra Python SDK returned no usable candles.${details?' '+details:''}`);
-  }
-  return {result:[{values}]};
+  return {result};
 }
 async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promise<any|null>{
   const exchange=entry.symbol==='SENSEX'?'BSE':'NSE';

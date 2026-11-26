@@ -1,1 +1,1 @@
-export type AppPage = 'catch-reversals' | 'broker';
+export type AppPage = 'catch-reversals' | 'bias-mtf' | 'broker';

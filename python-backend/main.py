@@ -375,11 +375,12 @@ def generic_history(request: GenericHistoricalRequest):
                 if not isinstance(instrument_dict, dict):
                     continue
                 for symbol, chart in instrument_dict.items():
-                    items[str(symbol).strip().upper()] = {
-                        field: _field_series(chart, field)
-                        for field in request.fields
-                        if _attr(chart, field, None) is not None
-                    }
+                    mapped = {}
+                    for field in request.fields:
+                        source_field = "cumulative_volume" if field == "volume" else field
+                        if _attr(chart, source_field, None) is not None:
+                            mapped[field] = _field_series(chart, source_field)
+                    items[str(symbol).strip().upper()] = mapped
         return {
             "exchange": request.exchange,
             "instrument_type": request.instrument_type,

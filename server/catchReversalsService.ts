@@ -131,7 +131,7 @@ async function postTimeseries(query:any[], _authHeaders:Record<string,string>):P
     const symbol=instrument.symbol.toUpperCase();
     const bars=payload.items?.[symbol]??[];
     if(!bars.length) continue;
-    const series=(field:'open'|'high'|'low'|'close'|'volume')=>bars.map(b=>({ts:b.timestamp,v:field==='volume'?b.volume:b[field]*100}));
+    const series=(field:'open'|'high'|'low'|'close'|'volume')=>bars.map(b=>({ts:b.timestamp,v:field==='volume'?b.volume*100:b[field]*100}));
     values.push({[symbol]:{open:series('open'),high:series('high'),low:series('low'),close:series('close'),volume:series('volume')}});
   }
   if(!values.length){
@@ -157,7 +157,7 @@ async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promi
 /** Shared daily OHLCV loader for scanners. Uses the exact multi-symbol Nubra request
  * and extractBars parser already used by Catch Reversals, avoiding a second REST dialect.
  */
-export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], brokerToken?:string):Promise<Map<string,Bar[]>> {
+export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], _brokerToken?:string):Promise<Map<string,Bar[]>> {
   // Historical data is fetched by the separately hosted official Nubra Python SDK service.
   // Browser OTP tokens are deliberately not passed to the Python SDK process.
   const h:Record<string,string>={};

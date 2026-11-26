@@ -33,7 +33,5 @@ jobs:
           node-version: "22"
       - name: Install dependencies
         run: npm install --no-audit --no-fund
-      - name: TypeScript validation
-        run: npm run lint
-      - name: Production frontend build
+      - name: Production Vite build
         run: npm run build

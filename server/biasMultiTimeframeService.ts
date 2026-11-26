@@ -1,40 +1,138 @@
-import { computeEMA, computeMarketBias, computeTwinRangeFilter } from '../shared/indicators.ts';
+import { computeMarketBias, computeTwinRangeFilter } from '../shared/indicators.ts';
 import { INDEX_BASKET_UNIVERSE, NIFTY_500_FNO_UNIVERSE, type StockUniverseEntry } from '../shared/nifty500Universe.ts';
-import { getNubraCredentialsForSession } from './brokerService.ts';
-import { getIstTradingDate, getLastCompletedWeekdayDate } from './marketDates.ts';
+import { fetchNubraChartFresh } from './marketDataService.ts';
 
-const BASE = process.env.NUBRA_API_BASE_URL?.trim() || 'https://api.nubra.io';
-const BATCH = 5;
-type Bar={date:string;timestamp:number;open:number;high:number;low:number;close:number;volume:number};
-type Row={symbol:string;name:string;price:number;weeklyTrend:'Bullish'|'Bearish';dailyTrend:'Bullish'|'Bearish';jointStatus:'Aligned'|'Divergent';twinRangeStatus:'Long'|'Short'|'No fresh signal';rsi:number;adx:number;chop:number;chartUrl:string};
-const chunks=<T,>(a:T[],n:number)=>Array.from({length:Math.ceil(a.length/n)},(_,i)=>a.slice(i*n,(i+1)*n));
-function indicators(bars:Bar[],period:number,smoothing:number){
- const mb=computeMarketBias(bars.map(b=>({...b,timestamp:b.timestamp})),{period,smoothing,oscPeriod:7});
- const i=bars.length-1;
- return {trend:mb.mbClose[i]>=mb.mbOpen[i]?'Bullish' as const:'Bearish' as const};
-}
-function rsi(v:number[],p=14){if(v.length<=p)return 50;let g=0,l=0;for(let i=1;i<=p;i++){const d=v[i]-v[i-1];g+=Math.max(d,0);l+=Math.max(-d,0);}let ag=g/p,al=l/p;for(let i=p+1;i<v.length;i++){const d=v[i]-v[i-1];ag=(ag*(p-1)+Math.max(d,0))/p;al=(al*(p-1)+Math.max(-d,0))/p;}return al===0?100:100-100/(1+ag/al);}
-function adx(b:Bar[],p=14){if(b.length<2*p+1)return 0;const tr:number[]=[],pd:number[]=[],md:number[]=[];for(let i=1;i<b.length;i++){const x=b[i-1],y=b[i],u=y.high-x.high,d=x.low-y.low;tr.push(Math.max(y.high-y.low,Math.abs(y.high-x.close),Math.abs(y.low-x.close)));pd.push(u>d&&u>0?u:0);md.push(d>u&&d>0?d:0);}let t=tr.slice(0,p).reduce((a,x)=>a+x,0),a=pd.slice(0,p).reduce((x,y)=>x+y,0),z=md.slice(0,p).reduce((x,y)=>x+y,0);const dx:number[]=[];for(let i=p;i<=tr.length;i++){const pi=t?a/t*100:0,mi=t?z/t*100:0;dx.push(pi+mi?Math.abs(pi-mi)/(pi+mi)*100:0);if(i<tr.length){t=t-t/p+tr[i];a=a-a/p+pd[i];z=z-z/p+md[i];}}let out=dx.slice(0,p).reduce((x,y)=>x+y,0)/p;for(let i=p;i<dx.length;i++)out=(out*(p-1)+dx[i])/p;return out;}
-function chop(b:Bar[],p=10){if(b.length<p+1)return 50;let sum=0;for(let i=b.length-p;i<b.length;i++){const x=b[i],q=b[i-1];sum+=Math.max(x.high-x.low,Math.abs(x.high-q.close),Math.abs(x.low-q.close));}const w=b.slice(-p),hi=Math.max(...w.map(x=>x.high)),lo=Math.min(...w.map(x=>x.low));return hi>lo&&sum>0?100*Math.log10(sum/(hi-lo))/Math.log10(p):50;}
-function extract(payload:any,symbol:string):Bar[]{const root=payload?.result?.find?.((r:any)=>r?.values?.some?.((v:any)=>v?.[symbol]))??payload?.result?.[0];const vals=root?.values?.find?.((v:any)=>v?.[symbol])?.[symbol]??root?.values?.[0]?.[symbol];if(!vals)return[];const map=new Map<number,any>();for(const k of ['open','high','low','close','volume'])for(const t of vals[k]??[]){const ts=Number(t.ts),o=map.get(ts)??{timestamp:ts};o[k]=Number(t.v)/100;map.set(ts,o);}return [...map.values()].filter(x=>x.open>0&&x.high>0&&x.low>0&&x.close>0).map(x=>({...x,date:new Date(x.timestamp).toISOString().slice(0,10)})).sort((a,b)=>a.timestamp-b.timestamp);}
-async function fetchBatch(entries:StockUniverseEntry[],token:string,device:string,start:string,end:string){const h:Record<string,string>={Accept:'application/json','Content-Type':'application/json',Authorization:`Bearer ${token}`};if(device)h['x-device-id']=device;const query=entries.map(e=>({exchange:e.symbol==='SENSEX'?'BSE':'NSE',type:e.isIndex?'INDEX':'STOCK',values:[e.symbol],fields:['open','high','low','close','volume'],interval:'1d',intraDay:false,startDate:start,endDate:end}));const r=await fetch(`${BASE}/charts/timeseries`,{method:'POST',headers:h,body:JSON.stringify({query}),cache:'no-store',signal:AbortSignal.timeout(20000)});if(!r.ok)throw new Error(`Nubra historical candles returned HTTP ${r.status}`);return r.json();}
-function toWeekly(bars:Bar[]){const map=new Map<string,Bar[]>();for(const b of bars){const d=new Date(b.timestamp);const day=(d.getUTCDay()+6)%7;d.setUTCDate(d.getUTCDate()-day);const key=d.toISOString().slice(0,10);const a=map.get(key)??[];a.push(b);map.set(key,a);}return [...map.values()].map(a=>({date:a[0].date,timestamp:a[0].timestamp,open:a[0].open,high:Math.max(...a.map(x=>x.high)),low:Math.min(...a.map(x=>x.low)),close:a.at(-1)!.close,volume:a.reduce((s,x)=>s+x.volume,0)}));}
-export async function getBiasMultiTimeframe(brokerToken?:string){
- const credentials=await getNubraCredentialsForSession(brokerToken);
- if(!credentials.authToken)throw new Error('Connect your live Nubra Finance account before scanning.');
- const token=credentials.authToken,device=credentials.deviceId??'';
- const universe=[...NIFTY_500_FNO_UNIVERSE.filter(x=>x.isFno),...INDEX_BASKET_UNIVERSE];
- const end=new Date().toISOString(),start=new Date(Date.now()-900*86400000).toISOString();
- const rows:Row[]=[];let failed=0;
- for(const group of chunks(universe,BATCH)){let payload:any;try{payload=await fetchBatch(group,token,device,start,end);}catch{failed+=group.length;continue;}
-  for(const entry of group){const bars=extract(payload,entry.symbol);if(bars.length<220){failed++;continue;}
-   const weekly=toWeekly(bars);if(weekly.length<120){failed++;continue;}
-   const w=indicators(weekly,100,50),d=indicators(bars,50,20);
-   const twin=computeTwinRangeFilter(bars.map(x=>x.close));const last=bars.length-1;
-   const latest=twin.signals[last];const trendSignal=latest==='BUY'?'Long':latest==='SELL'?'Short':'No fresh signal';
-   const closes=bars.map(x=>x.close);
-   rows.push({symbol:entry.symbol,name:entry.companyName,price:bars[last].close,weeklyTrend:w.trend,dailyTrend:d.trend,jointStatus:w.trend===d.trend?'Aligned':'Divergent',twinRangeStatus:trendSignal,rsi:rsi(closes),adx:adx(bars),chop:chop(bars),chartUrl:`https://www.tradingview.com/chart/?symbol=${entry.symbol==='SENSEX'?'BSE:SENSEX':`NSE:${entry.symbol}`}`});
+type Bar = { date: string; timestamp: number; open: number; high: number; low: number; close: number; volume: number };
+type Row = {
+  symbol: string; name: string; price: number;
+  weeklyTrend: 'Bullish' | 'Bearish'; dailyTrend: 'Bullish' | 'Bearish';
+  jointStatus: 'Aligned' | 'Divergent'; twinRangeStatus: 'Long' | 'Short' | 'No fresh signal';
+  rsi: number; adx: number; chop: number; chartUrl: string;
+};
+
+function round2(n: number) { return Math.round(n * 100) / 100; }
+function weeklyBars(daily: Bar[]): Bar[] {
+  const groups = new Map<string, Bar[]>();
+  for (const bar of daily) {
+    // Group by ISO week using the exchange candle date (NSE timezone date).
+    const d = new Date(bar.date + 'T12:00:00Z');
+    const weekday = (d.getUTCDay() + 6) % 7;
+    d.setUTCDate(d.getUTCDate() - weekday);
+    const key = d.toISOString().slice(0, 10);
+    const list = groups.get(key) ?? [];
+    list.push(bar);
+    groups.set(key, list);
   }
- }
- return {items:rows,universeCount:universe.length,loadedCount:rows.length,failedCount:failed,tradingDate:getLastCompletedWeekdayDate(),settings:{weekly:{period:100,smoothing:50,oscillator:7},daily:{period:50,smoothing:20,oscillator:7},twinRange:{fastPeriod:27,fastMultiplier:1.6,slowPeriod:55,slowMultiplier:2.0}}};
+  return [...groups.values()].map((bars) => ({
+    date: bars[0].date, timestamp: bars[0].timestamp,
+    open: bars[0].open, high: Math.max(...bars.map((b) => b.high)),
+    low: Math.min(...bars.map((b) => b.low)), close: bars[bars.length - 1].close,
+    volume: bars.reduce((sum, b) => sum + b.volume, 0),
+  }));
+}
+function biasTrend(bars: Bar[], period: number, smoothing: number): 'Bullish' | 'Bearish' {
+  const mb = computeMarketBias(bars, { period, smoothing, oscPeriod: 7 });
+  const i = bars.length - 1;
+  return mb.mbClose[i] >= mb.mbOpen[i] ? 'Bullish' : 'Bearish';
+}
+function rsi(closes: number[], period = 14): number {
+  if (closes.length <= period) return 50;
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1]; gain += Math.max(d, 0); loss += Math.max(-d, 0);
+  }
+  let avgGain = gain / period, avgLoss = loss / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(d, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-d, 0)) / period;
+  }
+  return avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+}
+function adx(bars: Bar[], period = 14): number {
+  if (bars.length < period * 2 + 1) return 0;
+  const tr: number[] = [], plus: number[] = [], minus: number[] = [];
+  for (let i = 1; i < bars.length; i++) {
+    const prev = bars[i - 1], cur = bars[i], up = cur.high - prev.high, down = prev.low - cur.low;
+    tr.push(Math.max(cur.high - cur.low, Math.abs(cur.high - prev.close), Math.abs(cur.low - prev.close)));
+    plus.push(up > down && up > 0 ? up : 0); minus.push(down > up && down > 0 ? down : 0);
+  }
+  let smTr = tr.slice(0, period).reduce((a,b)=>a+b,0);
+  let smPlus = plus.slice(0, period).reduce((a,b)=>a+b,0);
+  let smMinus = minus.slice(0, period).reduce((a,b)=>a+b,0);
+  const dx: number[] = [];
+  for (let i = period; i <= tr.length; i++) {
+    const p = smTr ? smPlus / smTr * 100 : 0, m = smTr ? smMinus / smTr * 100 : 0;
+    dx.push(p + m ? Math.abs(p - m) / (p + m) * 100 : 0);
+    if (i < tr.length) { smTr += tr[i] - smTr / period; smPlus += plus[i] - smPlus / period; smMinus += minus[i] - smMinus / period; }
+  }
+  let value = dx.slice(0, period).reduce((a,b)=>a+b,0) / period;
+  for (let i = period; i < dx.length; i++) value = (value * (period - 1) + dx[i]) / period;
+  return value;
+}
+function choppiness(bars: Bar[], period = 10): number {
+  if (bars.length < period + 1) return 50;
+  let sumTr = 0;
+  for (let i = bars.length - period; i < bars.length; i++) {
+    const cur = bars[i], prev = bars[i - 1];
+    sumTr += Math.max(cur.high - cur.low, Math.abs(cur.high - prev.close), Math.abs(cur.low - prev.close));
+  }
+  const window = bars.slice(-period), highest = Math.max(...window.map(b=>b.high)), lowest = Math.min(...window.map(b=>b.low));
+  return highest > lowest && sumTr > 0 ? 100 * Math.log10(sumTr / (highest - lowest)) / Math.log10(period) : 50;
+}
+function chartUrl(entry: StockUniverseEntry) {
+  const symbol = entry.symbol === 'SENSEX' ? 'BSE:SENSEX' : `NSE:${entry.symbol}`;
+  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(symbol)}`;
+}
+
+export async function getBiasMultiTimeframe(brokerToken?: string) {
+  // Reuse the exact authenticated Nubra /charts/timeseries request and parser used by the
+  // existing production scanners. Fetch 900 calendar days so EMA(100) has >100 weekly bars.
+  const universe = [...NIFTY_500_FNO_UNIVERSE.filter((entry) => entry.isFno), ...INDEX_BASKET_UNIVERSE];
+  const results: Row[] = [];
+  const failures: Array<{ symbol: string; reason: string }> = [];
+  const batchSize = 3;
+  for (let start = 0; start < universe.length; start += batchSize) {
+    const batch = universe.slice(start, start + batchSize);
+    const settled = await Promise.allSettled(batch.map(async (entry) => {
+      const chart = await fetchNubraChartFresh(entry, '1y', '1d', brokerToken, 900);
+      if (!chart?.bars?.length) throw new Error('Nubra returned no daily candles');
+      const daily = chart.bars as Bar[];
+      const weekly = weeklyBars(daily);
+      if (daily.length < 60) throw new Error(`Insufficient daily candles (${daily.length})`);
+      if (weekly.length < 105) throw new Error(`Insufficient weekly candles for EMA(100) (${weekly.length})`);
+      const weeklyTrend = biasTrend(weekly, 100, 50);
+      const dailyTrend = biasTrend(daily, 50, 20);
+      const twin = computeTwinRangeFilter(daily.map((b) => b.close));
+      const last = daily.length - 1;
+      const fresh = twin.signals[last];
+      const twinRangeStatus = fresh === 'BUY' ? 'Long' : fresh === 'SELL' ? 'Short' : 'No fresh signal';
+      const closes = daily.map((b) => b.close);
+      return {
+        symbol: entry.symbol, name: entry.companyName,
+        price: round2(chart.regularMarketPrice && chart.regularMarketPrice > 0 ? chart.regularMarketPrice : daily[last].close),
+        weeklyTrend, dailyTrend,
+        jointStatus: weeklyTrend === dailyTrend ? 'Aligned' as const : 'Divergent' as const,
+        twinRangeStatus, rsi: round2(rsi(closes)), adx: round2(adx(daily)), chop: round2(choppiness(daily)),
+        chartUrl: chartUrl(entry),
+      };
+    }));
+    settled.forEach((result, i) => {
+      if (result.status === 'fulfilled') results.push(result.value);
+      else failures.push({ symbol: batch[i].symbol, reason: result.reason instanceof Error ? result.reason.message : 'Unknown Nubra data error' });
+    });
+    if (start + batchSize < universe.length) await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return {
+    items: results,
+    universeCount: universe.length,
+    loadedCount: results.length,
+    failedCount: failures.length,
+    failures: failures.slice(0, 30),
+    settings: {
+      weekly: { period: 100, smoothing: 50, oscillator: 7 },
+      daily: { period: 50, smoothing: 20, oscillator: 7 },
+      twinRange: { fastPeriod: 27, fastMultiplier: 1.6, slowPeriod: 55, slowMultiplier: 2.0 },
+    },
+  };
 }

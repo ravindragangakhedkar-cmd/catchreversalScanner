@@ -190,9 +190,22 @@ export async function fetchNubraChartFresh(
     const map = new Map<number, Partial<OhlcvBar>>();
     for (const field of ['open', 'high', 'low', 'close', 'volume'] as const) {
       for (const point of block[field] ?? []) {
-        const row = map.get(point.ts) ?? { timestamp: point.ts, date: new Date(point.ts).toISOString().slice(0, 10) };
-        (row as any)[field] = field === 'volume' ? point.v : point.v / 100;
-        map.set(point.ts, row);
+        // Nubra SDK historical_data returns { timestamp, value } points (timestamp in ns).
+        // Some REST responses use { ts, v }. Support both formats.
+        const rawTimestamp = Number(point.timestamp ?? point.ts);
+        const rawValue = Number(point.value ?? point.v);
+        if (!Number.isFinite(rawTimestamp) || !Number.isFinite(rawValue)) continue;
+        const timestamp = rawTimestamp > 1e17
+          ? Math.floor(rawTimestamp / 1e6)
+          : rawTimestamp > 1e14
+            ? Math.floor(rawTimestamp / 1e6)
+            : rawTimestamp > 1e11
+              ? Math.floor(rawTimestamp)
+              : Math.floor(rawTimestamp * 1000);
+        if (!Number.isFinite(timestamp) || timestamp <= 0) continue;
+        const row = map.get(timestamp) ?? { timestamp, date: new Date(timestamp).toISOString().slice(0, 10) };
+        (row as any)[field] = field === 'volume' ? rawValue : rawValue / 100;
+        map.set(timestamp, row);
       }
     }
     const bars = [...map.values()].filter((b): b is OhlcvBar => typeof b.open === 'number' && typeof b.high === 'number' && typeof b.low === 'number' && typeof b.close === 'number').sort((a, b) => a.timestamp - b.timestamp);

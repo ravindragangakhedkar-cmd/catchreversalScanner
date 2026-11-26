@@ -105,15 +105,40 @@ function extractBars(payload:any, symbol:string):Bar[] {
     .map((b:any)=>({ts:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:Number.isFinite(b.volume)?b.volume:0}))
     .sort((a,b)=>a.ts-b.ts);
 }
-async function postTimeseries(query:any[], authHeaders:Record<string,string>):Promise<any> {
-  const r=await fetch(`${NUBRA_BASE}/charts/timeseries`,{method:'POST',headers:authHeaders,body:JSON.stringify({query}),cache:'no-store',signal:AbortSignal.timeout(18000)});
-  if (r.status === 440) throw new Error('Nubra session expired or invalid (HTTP 440). Reconnect Nubra using your mobile OTP and MPIN, then run the scanner again.');
-  if (r.status === 401 || r.status === 403) throw new Error(`Nubra authentication was rejected (HTTP ${r.status}). Reconnect Nubra and retry.`);
-  if (!r.ok) {
-    const detail = (await r.text().catch(() => '')).slice(0, 300);
-    throw new Error(`Nubra timeseries HTTP ${r.status}${detail ? ': ' + detail : ''}`);
+async function postTimeseries(query:any[], _authHeaders:Record<string,string>):Promise<any> {
+  const serviceUrl=process.env.NUBRA_PYTHON_API_URL?.trim();
+  const serviceKey=process.env.NUBRA_PYTHON_API_KEY?.trim();
+  if(!serviceUrl||!serviceKey) throw new Error('Nubra Python SDK service is not configured. Set NUBRA_PYTHON_API_URL and NUBRA_PYTHON_API_KEY in Vercel.');
+  const instruments=query.flatMap((q:any)=>Array.isArray(q.values)?q.values.map((symbol:string)=>({
+    symbol,exchange:q.exchange==='BSE'?'BSE':'NSE',instrument_type:q.type==='INDEX'?'INDEX':'STOCK'
+  })):[]);
+  if(!instruments.length) throw new Error('No instruments were supplied to the Nubra Python SDK service.');
+  if(instruments.length>5) throw new Error('Nubra Python SDK requests are limited to five instruments per batch.');
+  const first=query[0];
+  const response=await fetch(`${serviceUrl.replace(/\\/$/,'')}/v1/historical`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-service-key':serviceKey},
+    body:JSON.stringify({instruments,start_date:first.startDate,end_date:first.endDate,interval:first.interval??'1d'}),
+    cache:'no-store',signal:AbortSignal.timeout(60000)
+  });
+  if(!response.ok){
+    const detail=(await response.text().catch(()=>'' )).slice(0,500);
+    throw new Error(`Nubra Python SDK service HTTP ${response.status}${detail?': '+detail:''}`);
   }
-  return r.json();
+  const payload=await response.json() as {items?:Record<string,Array<{timestamp:number;open:number;high:number;low:number;close:number;volume:number}>>;failures?:Record<string,string>};
+  const values:any[]=[];
+  for(const instrument of instruments){
+    const symbol=instrument.symbol.toUpperCase();
+    const bars=payload.items?.[symbol]??[];
+    if(!bars.length) continue;
+    const series=(field:'open'|'high'|'low'|'close'|'volume')=>bars.map(b=>({ts:b.timestamp,v:field==='volume'?b.volume:b[field]*100}));
+    values.push({[symbol]:{open:series('open'),high:series('high'),low:series('low'),close:series('close'),volume:series('volume')}});
+  }
+  if(!values.length){
+    const details=Object.entries(payload.failures??{}).map(([symbol,reason])=>`${symbol}: ${reason}`).join(' | ');
+    throw new Error(`Nubra Python SDK returned no usable candles.${details?' '+details:''}`);
+  }
+  return {result:[{values}]};
 }
 async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promise<any|null>{
   const exchange=entry.symbol==='SENSEX'?'BSE':'NSE';

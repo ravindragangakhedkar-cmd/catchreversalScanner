@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import builtins
+import csv
 import getpass
 import os
 import threading
 import time
+import requests
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -18,6 +20,8 @@ app = FastAPI(title="Catch Reversals Nubra SDK Service", version="1.0.0")
 _sdk_lock = threading.RLock()
 _sdk_client: Any | None = None
 _sdk_created_at = 0.0
+_instrument_master_cache: dict[str, tuple[float, Any]] = {}
+INSTRUMENT_CACHE_SECONDS = 900
 SDK_MAX_AGE_SECONDS = 6 * 60 * 60
 
 
@@ -303,19 +307,28 @@ def instruments(
 
     try:
         from nubra_python_sdk.refdata.instruments import InstrumentData
-        frame = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
+        cached = _instrument_master_cache.get(exchange)
+        if cached and time.time() - cached[0] < INSTRUMENT_CACHE_SECONDS:
+            frame = cached[1].copy()
+        else:
+            frame = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
+            if frame is not None:
+                _instrument_master_cache[exchange] = (time.time(), frame.copy())
         if frame is None or frame.empty:
             return {"exchange": exchange, "count": 0, "items": []}
 
         selected = frame.copy()
-        filters = {
-            "asset": asset,
-            "derivative_type": derivative_type,
-            "option_type": option_type,
-        }
-        for column, expected in filters.items():
-            if expected is not None and column in selected.columns:
-                selected = selected[selected[column].astype(str).str.upper() == expected.upper()]
+        if asset is not None and "asset" in selected.columns:
+            selected = selected[selected["asset"].astype(str).str.upper() == asset.upper()]
+        if derivative_type == "STOCK":
+            if "asset_type" in selected.columns:
+                selected = selected[selected["asset_type"].astype(str).str.upper().eq("STOCKS")]
+            elif "derivative_type" in selected.columns:
+                selected = selected[selected["derivative_type"].isna()]
+        elif derivative_type is not None and "derivative_type" in selected.columns:
+            selected = selected[selected["derivative_type"].astype(str).str.upper() == derivative_type.upper()]
+        if option_type is not None and "option_type" in selected.columns:
+            selected = selected[selected["option_type"].astype(str).str.upper() == option_type.upper()]
         if expiry is not None and "expiry" in selected.columns:
             selected = selected[selected["expiry"].astype(str).str.replace(r"\\.0$", "", regex=True) == expiry]
         if symbol is not None:

@@ -5,6 +5,7 @@ import { getIstSessionUtcRange, getIstTradingDate, getLastCompletedWeekdayDate, 
 const BATCH_SIZE = 5;
 type Tick = { ts: number; v: number };
 type Bar = { ts: number; open: number; high: number; low: number; close: number; volume: number };
+type DailyBiasBar = { date: string; timestamp: number; open: number; high: number; low: number; close: number; volume: number };
 type Contract = { symbol?: string; sp?: number; ltp?: number; oi?: number; prev_oi?: number; ltpchg?: number };
 type Chain = { chain?: { cp?: number; atm?: number; expiry?: string; all_expiries?: string[]; ce?: Contract[]; pe?: Contract[]; underlying_instrument?: { ltp?: number; prev_close?: number } } };
 export type CatchReversalRow = {
@@ -209,13 +210,13 @@ async function getChain(entry:StockUniverseEntry, _headers:Record<string,string>
 /** Shared daily OHLCV loader for scanners. Uses the exact multi-symbol Nubra request
  * and extractBars parser already used by Catch Reversals, avoiding a second REST dialect.
  */
-export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], _brokerToken?:string):Promise<Map<string,Bar[]>> {
+export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], _brokerToken?:string):Promise<Map<string,DailyBiasBar[]>> {
   // Historical data is fetched by the separately hosted official Nubra Python SDK service.
   // Browser OTP tokens are deliberately not passed to the Python SDK process.
   const h:Record<string,string>={};
   const endDate=`${getIstSessionUtcRange(getLastCompletedWeekdayDate()).nextDay}T00:00:00.000Z`;
   const startDate=new Date(Date.now()-400*24*60*60*1000).toISOString();
-  const output=new Map<string,Bar[]>();
+  const output=new Map<string,DailyBiasBar[]>();
   for(const group of chunks(entries,BATCH_SIZE)){
     const query=group.map(entry=>({
       exchange:entry.symbol==='SENSEX'?'BSE':'NSE',

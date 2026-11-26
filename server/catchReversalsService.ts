@@ -10,7 +10,7 @@ type Bar = { ts: number; open: number; high: number; low: number; close: number;
 type Contract = { symbol?: string; sp?: number; ltp?: number; oi?: number; prev_oi?: number; ltpchg?: number };
 type Chain = { chain?: { cp?: number; atm?: number; expiry?: string; all_expiries?: string[]; ce?: Contract[]; pe?: Contract[]; underlying_instrument?: { ltp?: number; prev_close?: number } } };
 export type CatchReversalRow = {
-  symbol: string; name: string; isIndex: boolean; underlying: number; reversal: 'Rejected from resistance' | 'Bounce off from Support'; level: string;
+  symbol: string; name: string; isIndex: boolean; underlying: number; reversal: 'Rejected from resistance' | 'Bounce off from Support' | 'Near Daily Support · Watch' | 'Near Daily Resistance · Watch'; level: string; distancePercent: number;
   callChange: number | null; putChange: number | null; emaCross: 'Done' | 'Pending'; bbwp: number; bbwpStatus: string;
   rsi: number; rsiDelta: number; adx: number; adxDelta: number; chop: number; chopDelta: number;
   chartUrl: string; geminiAnalysis: string;
@@ -106,22 +106,28 @@ async function fetchGroup(entries:StockUniverseEntry[], h:Record<string,string>,
       const completed=bars.filter(b=>new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})<=sessionIsoDate); if(completed.length<25)continue;
       const prev=completed.at(-2)!; const today=completed.at(-1)!; const lv=pivots(prev);
       const spot=item.spot;
-      const levelCandidates=Object.entries(lv).filter(([k,v])=>k==='PP'||(['S1','S2'].includes(k)?v<=spot:v>=spot));
-      const nearestLevel=levelCandidates.map(([k,v])=>({k,v,dist:Math.abs(spot-v)/spot})).sort((a,b)=>a.dist-b.dist)[0];
-      if(!nearestLevel||nearestLevel.dist>0.006)continue;
-      const support=nearestLevel.k==='S1'||nearestLevel.k==='S2'||(nearestLevel.k==='PP'&&spot>=nearestLevel.v);
+      // Daily support/resistance levels are calculated from the previous completed daily candle.
+      // A 1.25% distance is the near-term watchlist band; confirmed reversals keep the original 0.60% band.
+      const nearestLevel=Object.entries(lv)
+        .map(([k,v])=>({k,v,dist:Math.abs(spot-v)/spot}))
+        .sort((a,b)=>a.dist-b.dist)[0];
+      if(!nearestLevel||nearestLevel.dist>0.0125)continue;
+      const support=nearestLevel.v<spot||(nearestLevel.k==='PP'&&spot>=nearestLevel.v);
       const reversal=support?spot>=nearestLevel.v&&spot>=today.open:spot<=nearestLevel.v&&spot<=today.open;
-      if(!reversal)continue;
       const closes=completed.map(b=>b.close); const liveCloses=[...closes.slice(0,-1),spot],startCloses=[...closes.slice(0,-1),today.open];
       const bb=computeBBWPSeries(liveCloses); const bbwp=bb.at(-1)??0; const bbwpPrev=bb.at(-2)??bbwp; const bbwpSma=bb.slice(-9).reduce((a,b)=>a+b,0)/Math.min(9,bb.length);
-      if(bbwp<75||bbwp>95||bbwp>=bbwpPrev)continue;
       const e9=computeEMA(liveCloses,9),e14=computeEMA(liveCloses,14); const emaCross=support?(e9.at(-1)!>e14.at(-1)!?'Done':'Pending'):(e9.at(-1)!<e14.at(-1)!?'Done':'Pending');
       const rsiNow=rsi(liveCloses),rsiStart=rsi(startCloses); const liveBars=[...completed.slice(0,-1),{...today,close:spot}],startBars=[...completed.slice(0,-1),{...today,close:today.open}]; const adxNow=adxApprox(liveBars),adxStart=adxApprox(startBars); const chopNow=chopApprox(liveBars),chopStart=chopApprox(startBars);
       const callOiStart=num(cv?.cumulative_oi?.[0]?.v),callOiEnd=num(cv?.cumulative_oi?.at(-1)?.v),putOiStart=num(pv?.cumulative_oi?.[0]?.v),putOiEnd=num(pv?.cumulative_oi?.at(-1)?.v);
       const callOiDrop=callOiStart&&callOiEnd?pct(callOiEnd,callOiStart):null,putOiDrop=putOiStart&&putOiEnd?pct(putOiEnd,putOiStart):null;
       const unwind=support?(putChange!==null&&putChange< -0.1&&putOiDrop!==null&&putOiDrop<=-0.1):(callChange!==null&&callChange< -0.1&&callOiDrop!==null&&callOiDrop<=-0.1);
-      if(!unwind)continue;
-      rows.push({symbol:item.entry.symbol,name:item.entry.companyName,isIndex:Boolean(item.entry.isIndex),underlying:spot,reversal:support?'Bounce off from Support':'Rejected from resistance',level:nearestLevel.k,callChange,putChange,emaCross,bbwp,bbwpStatus:bbwp<bbwpSma?'Below 9 SMA · Fading':Math.abs(bbwp-bbwpSma)<=1?'At 9 SMA · Fading':'Fading expansion',rsi:rsiNow,rsiDelta:rsiNow-rsiStart,adx:adxNow,adxDelta:adxNow-adxStart,chop:chopNow,chopDelta:chopNow-chopStart,chartUrl:`https://www.tradingview.com/chart/?symbol=${item.entry.symbol==='SENSEX'?'BSE:SENSEX':`NSE:${item.entry.symbol}`}`,geminiAnalysis:'Awaiting Gemini analysis'});
+      const confirmedReversal=nearestLevel.dist<=0.006&&reversal&&bbwp>=75&&bbwp<=95&&bbwp<bbwpPrev&&unwind;
+      const watchSupport=support;
+      const reversalLabel=confirmedReversal
+        ? (support?'Bounce off from Support':'Rejected from resistance')
+        : (watchSupport?'Near Daily Support · Watch':'Near Daily Resistance · Watch');
+      const distancePercent=nearestLevel.dist*100;
+      rows.push({symbol:item.entry.symbol,name:item.entry.companyName,isIndex:Boolean(item.entry.isIndex),underlying:spot,reversal:reversalLabel,level:nearestLevel.k,distancePercent,callChange,putChange,emaCross,bbwp,bbwpStatus:bbwp<bbwpSma?'Below 9 SMA · Fading':Math.abs(bbwp-bbwpSma)<=1?'At 9 SMA · Fading':'Fading expansion',rsi:rsiNow,rsiDelta:rsiNow-rsiStart,adx:adxNow,adxDelta:adxNow-adxStart,chop:chopNow,chopDelta:chopNow-chopStart,chartUrl:`https://www.tradingview.com/chart/?symbol=${item.entry.symbol==='SENSEX'?'BSE:SENSEX':`NSE:${item.entry.symbol}`}`,geminiAnalysis:'Awaiting Gemini analysis'});
     }
   }
   return rows;

@@ -95,7 +95,7 @@ export async function getBiasMultiTimeframe(brokerToken?: string) {
   for (let start = 0; start < universe.length; start += batchSize) {
     const batch = universe.slice(start, start + batchSize);
     const settled = await Promise.allSettled(batch.map(async (entry) => {
-      const chart = await fetchNubraChartFresh(entry, '1y', '1d', brokerToken, 365);
+      const chart = await fetchNubraChartFresh(entry, '1y', '1d', brokerToken, 400);
       if (!chart?.bars?.length) throw new Error('Nubra returned no daily candles');
       const daily = chart.bars as Bar[];
       const weekly = weeklyBars(daily);

@@ -3,6 +3,7 @@ import { AuthProvider } from './context/AuthContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { MarketTicker } from './components/MarketTicker';
 import { CatchReversalsPage } from './pages/CatchReversalsPage';
+import { BiasMultiTimeframePage } from './pages/BiasMultiTimeframePage';
 import { BrokerConnectPage } from './pages/BrokerConnectPage';
 import type { AppPage } from './components/TopNav';
 
@@ -19,6 +20,9 @@ function StandaloneApp() {
             <button type="button" onClick={() => setActivePage('catch-reversals')} aria-current={activePage === 'catch-reversals' ? 'page' : undefined} className={`rounded-lg px-3 py-2 text-sm font-semibold ${activePage === 'catch-reversals' ? 'bg-emerald-50 text-emerald-800' : 'text-slate-600 hover:bg-slate-100'}`}>
               Scanner
             </button>
+            <button type="button" onClick={() => setActivePage('bias-mtf')} aria-current={activePage === 'bias-mtf' ? 'page' : undefined} className={`rounded-lg px-3 py-2 text-sm font-semibold ${activePage === 'bias-mtf' ? 'bg-indigo-50 text-indigo-800' : 'text-slate-600 hover:bg-slate-100'}`}>
+              Bias Multi Time Frame
+            </button>
             <button type="button" onClick={() => setActivePage('broker')} aria-current={activePage === 'broker' ? 'page' : undefined} className={`rounded-lg px-3 py-2 text-sm font-semibold ${activePage === 'broker' ? 'bg-emerald-50 text-emerald-800' : 'text-slate-600 hover:bg-slate-100'}`}>
               Broker Connect
             </button>
@@ -29,10 +33,12 @@ function StandaloneApp() {
       <main className="flex-1">
         {activePage === 'catch-reversals'
           ? <CatchReversalsPage onNavigate={setActivePage} />
-          : <BrokerConnectPage onNavigate={setActivePage} />}
+          : activePage === 'bias-mtf'
+            ? <BiasMultiTimeframePage onNavigate={setActivePage} />
+            : <BrokerConnectPage onNavigate={setActivePage} />}
       </main>
       <footer className="mt-auto border-t border-slate-200 bg-white px-4 py-5 text-center text-xs text-slate-500">
-        Catch Reversals Scanner · Nubra Finance integration · Technical screening only, not investment advice
+        Catch Reversals Scanner · Bias Multi Time Frame Scanner · Nubra Finance integration · Technical screening only, not investment advice
       </footer>
     </div>
   );

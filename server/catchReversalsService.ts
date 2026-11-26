@@ -85,13 +85,13 @@ async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promi
 async function fetchDailyWatchlist(entries:StockUniverseEntry[], h:Record<string,string>, historyStart:string, historyEnd:string, sessionIsoDate:string):Promise<CatchReversalRow[]> {
   const out:CatchReversalRow[]=[];
   for(const group of chunks(entries,BATCH_SIZE)){
-    const query=[{
-      exchange:group.some(x=>x.symbol==='SENSEX')?'BSE':'NSE',
-      type:'STOCK',
-      values:group.map(x=>x.symbol),
+    const query=group.map(entry=>({
+      exchange:entry.symbol==='SENSEX'?'BSE':'NSE',
+      type:entry.isIndex?'INDEX':'STOCK',
+      values:[entry.symbol],
       fields:['open','high','low','close','volume'],
       interval:'1d',intraDay:false,startDate:historyStart,endDate:historyEnd
-    }];
+    }));
     let data:any;
     try{data=await postTimeseries(query,h);}catch{continue;}
     for(const entry of group){
@@ -202,6 +202,6 @@ export async function getCatchReversals(brokerToken?:string){
   const confirmedSymbols=new Set(confirmedRows.map(row=>row.symbol));
   const all=[...confirmedRows,...watchRows.filter(row=>!confirmedSymbols.has(row.symbol))];
   // Expiry is selected per underlying from Nubra's actual monthly contract calendar.
-  const firstChain=await getChain(universe[0],h); const expiry=firstChain?.expiry??getNextMonthlyExpiry(firstChain?.chain?.all_expiries??[]);
+  const firstChain=await getChain(universe[0],h); const expiry=firstChain?.expiry??getNextMonthlyExpiry(firstChain?.all_expiries??[]);
   return {items:all,clock,expiry,tradingDate,batchSize:BATCH_SIZE,universeCount:universe.length,loadedCount:all.length,watchlistCount:watchRows.length,confirmedCount:confirmedRows.length};
 }

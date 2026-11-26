@@ -291,6 +291,7 @@ def instruments(
     exchange: str = "NSE",
     asset: str | None = None,
     derivative_type: str | None = None,
+    asset_type: str | None = None,
     expiry: str | None = None,
     option_type: str | None = None,
     symbol: str | None = None,
@@ -329,6 +330,8 @@ def instruments(
             selected = selected[selected["derivative_type"].astype(str).str.upper() == derivative_type.upper()]
         if option_type is not None and "option_type" in selected.columns:
             selected = selected[selected["option_type"].astype(str).str.upper() == option_type.upper()]
+        if asset_type is not None and "asset_type" in selected.columns:
+            selected = selected[selected["asset_type"].astype(str).str.upper() == asset_type.upper()]
         if expiry is not None and "expiry" in selected.columns:
             selected = selected[selected["expiry"].astype(str).str.replace(r"\\.0$", "", regex=True) == expiry]
         if symbol is not None:

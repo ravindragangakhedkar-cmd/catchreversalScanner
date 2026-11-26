@@ -461,8 +461,8 @@ def current_price(instrument: str, exchange: str = "NSE"):
             "instrument": instrument.strip().upper(),
             "exchange": exchange,
             "message": _json_value(_attr(result, "message")),
-            "price": _json_value(_attr(result, "price")),
-            "previous_close": _json_value(_attr(result, "prev_close")),
+            "price": (float(_attr(result, "price")) / 100.0) if _attr(result, "price") is not None else None,
+            "previous_close": (float(_attr(result, "prev_close")) / 100.0) if _attr(result, "prev_close") is not None else None,
             "change_percent": _json_value(_attr(result, "change")),
             "timestamp": _json_value(_attr(result, "timestamp")),
         }

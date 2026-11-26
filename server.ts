@@ -255,6 +255,15 @@ app.post('/api/nubra/history',async(req,res)=>{
   } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra historical data request failed.'}); }
 });
 
+app.get('/api/nubra/indices',async(req,res)=>{
+  try {
+    const symbol=typeof req.query.symbol==='string'?req.query.symbol.trim():'';
+    const params=new URLSearchParams();if(symbol)params.set('symbol',symbol);
+    res.setHeader('Cache-Control','public, max-age=900');
+    res.json(await nubraPythonFetch(`/v1/indices?${params.toString()}`));
+  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra index master lookup failed.'}); }
+});
+
 app.get('/api/nubra/current-price',async(req,res)=>{
   try {
     const instrument=typeof req.query.instrument==='string'?req.query.instrument.trim():'';

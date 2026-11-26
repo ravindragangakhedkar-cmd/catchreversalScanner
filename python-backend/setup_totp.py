@@ -13,15 +13,15 @@ from nubra_python_sdk.start_sdk import InitNubraSdk, NubraEnv
 def main():
     print("Starting Nubra's official Python SDK login.")
     print("Enter your registered mobile number, SMS OTP and MPIN when prompted.")
-    client = InitNubraSdk(NubraEnv.PROD)
-    secret = client.totp_generate_secret()
+    setup_client = InitNubraSdk(NubraEnv.PROD)
+    secret = setup_client.totp_generate_secret()
     print("\nNubra TOTP secret (keep private):")
     print(secret)
     print("\nNow enable TOTP. Follow the SDK prompts and enter the authenticator code.")
     client.totp_enable()
     print("\nTOTP setup completed. Add PHONE_NO, MPIN and this TOTP secret to Render.")
     try:
-        client.logout()
+        enable_client.logout()
     except Exception:
         pass
 

@@ -109,21 +109,27 @@ async function postTimeseries(query:any[], _authHeaders:Record<string,string>):P
   if(!serviceUrl||!serviceKey) throw new Error('Nubra Python SDK service is not configured. Set NUBRA_PYTHON_API_URL and NUBRA_PYTHON_API_KEY in Vercel.');
   const result:any[]=[];
   const base=serviceUrl.replace(/\/$/,'');
-  const requestGroup=async(q:any,symbols:string[])=>{
+  type Group={exchange:string;type:string;fields:string[];startDate:string;endDate:string;interval:string;intraDay:boolean;realTime:boolean;symbols:string[]};
+  const groups=new Map<string,Group>();
+  for(const q of query){
+    const symbols=Array.isArray(q.values)?q.values.map((x:string)=>String(x).trim().toUpperCase()).filter(Boolean):[];
+    if(!symbols.length) continue;
     const fields=(Array.isArray(q.fields)?q.fields:['open','high','low','close','volume']).map((x:string)=>x==='volume'?'cumulative_volume':x);
+    const group={exchange:q.exchange??'NSE',type:q.type??'STOCK',fields,startDate:q.startDate,endDate:q.endDate,interval:q.interval??'1d',intraDay:Boolean(q.intraDay),realTime:Boolean(q.realTime),symbols:[] as string[]};
+    const key=JSON.stringify([group.exchange,group.type,group.fields,group.startDate,group.endDate,group.interval,group.intraDay,group.realTime]);
+    const existing=groups.get(key)??group;
+    for(const symbol of symbols) if(!existing.symbols.includes(symbol)) existing.symbols.push(symbol);
+    groups.set(key,existing);
+  }
+  const chunksOf=(items:string[],size:number)=>{const out:string[][]=[];for(let i=0;i<items.length;i+=size)out.push(items.slice(i,i+size));return out;};
+  const requestGroup=async(g:Group,symbols:string[])=>{
     const response=await fetch(`${base}/v1/history`,{
       method:'POST',
       headers:{'Content-Type':'application/json','x-service-key':serviceKey},
       body:JSON.stringify({
-        exchange:q.exchange??'NSE',
-        instrument_type:q.type??'STOCK',
-        symbols,
-        fields,
-        start_date:q.startDate,
-        end_date:q.endDate,
-        interval:q.interval??'1d',
-        intraday:Boolean(q.intraDay),
-        realtime:Boolean(q.realTime)
+        exchange:g.exchange,instrument_type:g.type,symbols,fields:g.fields,
+        start_date:g.startDate,end_date:g.endDate,interval:g.interval,
+        intraday:g.intraDay,realtime:g.realTime
       }),
       cache:'no-store',signal:AbortSignal.timeout(60000)
     });
@@ -139,27 +145,22 @@ async function postTimeseries(query:any[], _authHeaders:Record<string,string>):P
         const outputField=field==='cumulative_volume'?'volume':field;
         mapped[outputField]=(points??[]).map(point=>({
           ts:point.timestamp,
-          // Keep the legacy parser's native-unit contract: prices and volume
-          // are converted back to paise/native units; OI and Greeks stay unchanged.
           v:['open','high','low','close','volume'].includes(outputField)?Number(point.value)*100:Number(point.value)
         }));
       }
       if(Object.keys(mapped).length) values.push({[symbol.toUpperCase()]:mapped});
     }
-    if(values.length) result.push({exchange:q.exchange??'NSE',type:q.type??'STOCK',values});
+    if(values.length) result.push({exchange:g.exchange,type:g.type,values});
   };
-  for(const q of query){
-    const symbols=Array.isArray(q.values)?q.values.map((x:string)=>String(x).trim().toUpperCase()).filter(Boolean):[];
-    if(!symbols.length) continue;
-    if(symbols.length>5) throw new Error('Nubra supports at most five instruments per historical request.');
-    try{
-      await requestGroup(q,symbols);
-    }catch(batchError){
-      if(symbols.length===1) throw batchError;
-      // A failed option contract must not discard its valid pair or other symbols.
-      for(const symbol of symbols){
-        try{await requestGroup(q,[symbol]);}
-        catch(singleError){console.warn(`[Nubra Python SDK] Skipped ${symbol}: ${singleError instanceof Error?singleError.message:String(singleError)}`);}
+  for(const group of groups.values()){
+    for(const batch of chunksOf(group.symbols,5)){
+      try{await requestGroup(group,batch);}
+      catch(batchError){
+        if(batch.length===1) throw batchError;
+        for(const symbol of batch){
+          try{await requestGroup(group,[symbol]);}
+          catch(singleError){console.warn(`[Nubra Python SDK] Skipped ${symbol}: ${singleError instanceof Error?singleError.message:String(singleError)}`);}
+        }
       }
     }
   }

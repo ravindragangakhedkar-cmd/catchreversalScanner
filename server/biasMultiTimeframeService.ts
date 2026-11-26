@@ -86,8 +86,8 @@ function chartUrl(entry: StockUniverseEntry) {
 }
 
 export async function getBiasMultiTimeframe(brokerToken?: string) {
-  // Reuse the exact authenticated Nubra /charts/timeseries request and parser used by the
-  // existing production scanners. Fetch 900 calendar days so EMA(100) has >100 weekly bars.
+  // Match the proven production scanner's one-year Nubra daily-history request. Nubra
+  // rejects oversized 900-day requests; use a weekly Market Bias period that fits this history.
   const universe = [...NIFTY_500_FNO_UNIVERSE.filter((entry) => entry.isFno), ...INDEX_BASKET_UNIVERSE];
   const results: Row[] = [];
   const failures: Array<{ symbol: string; reason: string }> = [];
@@ -95,13 +95,13 @@ export async function getBiasMultiTimeframe(brokerToken?: string) {
   for (let start = 0; start < universe.length; start += batchSize) {
     const batch = universe.slice(start, start + batchSize);
     const settled = await Promise.allSettled(batch.map(async (entry) => {
-      const chart = await fetchNubraChartFresh(entry, '1y', '1d', brokerToken, 900);
+      const chart = await fetchNubraChartFresh(entry, '1y', '1d', brokerToken, 365);
       if (!chart?.bars?.length) throw new Error('Nubra returned no daily candles');
       const daily = chart.bars as Bar[];
       const weekly = weeklyBars(daily);
       if (daily.length < 60) throw new Error(`Insufficient daily candles (${daily.length})`);
-      if (weekly.length < 105) throw new Error(`Insufficient weekly candles for EMA(100) (${weekly.length})`);
-      const weeklyTrend = biasTrend(weekly, 100, 50);
+      if (weekly.length < 40) throw new Error(`Insufficient weekly candles for Market Bias period 40 (${weekly.length})`);
+      const weeklyTrend = biasTrend(weekly, 40, 20);
       const dailyTrend = biasTrend(daily, 50, 20);
       const twin = computeTwinRangeFilter(daily.map((b) => b.close));
       const last = daily.length - 1;
@@ -135,7 +135,7 @@ export async function getBiasMultiTimeframe(brokerToken?: string) {
     failedCount: failures.length,
     failures: failures.slice(0, 30),
     settings: {
-      weekly: { period: 100, smoothing: 50, oscillator: 7 },
+      weekly: { period: 40, smoothing: 20, oscillator: 7 },
       daily: { period: 50, smoothing: 20, oscillator: 7 },
       twinRange: { fastPeriod: 27, fastMultiplier: 1.6, slowPeriod: 55, slowMultiplier: 2.0 },
     },

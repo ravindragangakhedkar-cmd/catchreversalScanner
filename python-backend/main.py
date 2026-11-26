@@ -355,6 +355,21 @@ def instruments(
         raise HTTPException(status_code=502, detail=f"Nubra instrument master failed: {type(exc).__name__}: {exc}") from exc
 
 
+@app.get("/v1/indices", dependencies=[Depends(_authorize)])
+def indices_master(symbol: str | None = None):
+    """Nubra public Index Master is separate from the tradable instruments DataFrame."""
+    try:
+        response = requests.get("https://api.nubra.io/public/indexes?format=csv", timeout=15)
+        response.raise_for_status()
+        rows = list(csv.DictReader(response.text.splitlines()))
+        if symbol:
+            needle = symbol.strip().upper()
+            rows = [row for row in rows if any(needle in str(value).upper() for value in row.values())]
+        return {"count": len(rows), "items": rows, "source": "Nubra public Index Master"}
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Nubra Index Master request failed: {exc}") from exc
+
+
 @app.post("/v1/history", dependencies=[Depends(_authorize)])
 def generic_history(request: GenericHistoricalRequest):
     allowed_intervals = {"1s", "1m", "2m", "3m", "5m", "15m", "30m", "1h", "1d", "1w", "1mth"}

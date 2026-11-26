@@ -1,10 +1,20 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import type { BrokerSessionInfo } from '../../shared/types';
+import type { BrokerSessionInfo, UserProfileDoc } from '../../shared/types';
 
 interface BrokerContextValue {
   brokerSession: BrokerSessionInfo | null;
   brokerToken: string | null;
   clientId: string;
+  // Compatibility values for dormant legacy pages; no website authentication is performed.
+  user: { uid: string; email: string | null; displayName: string | null; emailVerified: boolean } | null;
+  profile: UserProfileDoc | null;
+  authReady: boolean;
+  isVerified: boolean;
+  trialHoursLeft: number;
+  isTrialExpired: boolean;
+  hasScannerAccess: boolean;
+  signOut: () => Promise<void>;
+  activateSubscription: (plan: 'monthly' | 'yearly', orderId: string) => Promise<void>;
   setBrokerSessionState: (token: string | null, session: BrokerSessionInfo | null) => void;
 }
 const BrokerContext = createContext<BrokerContextValue | null>(null);
@@ -61,8 +71,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => { cancelled = true; };
   }, [setBrokerSessionState]);
 
+  const compatibility = useMemo(() => ({
+    user: null,
+    profile: null,
+    authReady: true,
+    isVerified: true,
+    trialHoursLeft: Number.POSITIVE_INFINITY,
+    isTrialExpired: false,
+    hasScannerAccess: true,
+    signOut: async () => { setBrokerSessionState(null, null); },
+    activateSubscription: async (_plan: 'monthly' | 'yearly', _orderId: string) => {},
+  }), [setBrokerSessionState]);
+
   return (
-    <BrokerContext.Provider value={{ brokerSession, brokerToken, clientId, setBrokerSessionState }}>
+    <BrokerContext.Provider value={{ brokerSession, brokerToken, clientId, ...compatibility, setBrokerSessionState }}>
       {children}
     </BrokerContext.Provider>
   );

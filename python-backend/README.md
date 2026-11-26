@@ -4,7 +4,7 @@ This service runs the official Nubra Python SDK outside Vercel and exposes a sma
 
 ## Authentication
 
-This service uses Nubra's documented server-side TOTP login flow. First enable TOTP once on the Nubra account using the SDK setup flow. Then configure these private Render environment variables:
+This service uses Nubra's documented server-side TOTP login flow and pins the current documented Python SDK V3 release (0.5.5). First enable TOTP once on the Nubra account using the SDK setup flow. Then configure these private Render environment variables:
 
 - `NUBRA_PHONE_NO`: registered 10-digit phone number
 - `NUBRA_MPIN`: Nubra MPIN
@@ -19,9 +19,15 @@ Use Render Blueprint deployment with this folder's `render.yaml`. Set the three 
 
 The Render service is separate from the Vercel frontend because Vercel's Node.js runtime does not execute the Python SDK.
 
-## API
+## API (all require `x-service-key`, except `/health`)
 
-- `GET /health`
-- `POST /v1/historical` with header `x-service-key`, at most five instruments per request.
+- `GET /health` — health check.
+- `GET /v1/instruments?exchange=NSE&asset=RELIANCE&derivative_type=FUT` — current instrument master, filtered by underlying, expiry, CE/PE and derivative type. Exchanges: NSE, BSE, MCX.
+- `GET /v1/current-price?instrument=RELIANCE&exchange=NSE` — latest price and previous close.
+- `POST /v1/history` — generic historical series for up to five symbols. `instrument_type` can be `STOCK`, `INDEX`, `FUT` or `OPT`; choose fields such as OHLC, volume, OI, IV and Greeks supported for that instrument.
+- `GET /v1/option-chain?instrument=NIFTY&exchange=NSE` — chain snapshot, expiries, ATM strike and CE/PE strike data.
+- `POST /v1/historical` — compatibility endpoint used by existing scanner candle calculations.
 
-The service only fetches market data. It does not place orders.
+The matching Vercel proxies are `/api/nubra/instruments`, `/api/nubra/current-price`, `/api/nubra/history` and `/api/nubra/option-chain`. The service is read-only: it fetches market data and does not place orders.
+
+Historical data is limited by Nubra to five instruments per request and 60 calls per minute. Intraday history generally has a shorter retention window; the API validates the requested interval and uses UTC timestamps.

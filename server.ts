@@ -233,7 +233,7 @@ async function nubraPythonFetch(path:string,init:RequestInit={}) {
 
 app.get('/api/nubra/instruments',async(req,res)=>{
   try {
-    const allowed=['exchange','asset','derivative_type','expiry','option_type','symbol','limit'];
+    const allowed=['exchange','asset','derivative_type','asset_type','expiry','option_type','symbol','limit'];
     const params=new URLSearchParams();
     for(const key of allowed){const value=req.query[key];if(typeof value==='string'&&value.trim())params.set(key,value.trim());}
     res.setHeader('Cache-Control','no-store');

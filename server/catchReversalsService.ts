@@ -379,12 +379,17 @@ export async function getCatchReversals(_brokerToken?:string){
   const universe=[...NIFTY_500_FNO_UNIVERSE.filter(x=>x.isFno),...INDEX_BASKET_UNIVERSE];
   // Always build the near-level watchlist from daily candles first; it has no option-chain dependency.
   const watchRows=await fetchDailyWatchlist(universe,h,historyStart,historyEnd,sessionIsoDate);
+  // Only request option chains and option-history for instruments already near a
+  // previous-day pivot. This avoids wasting derivative API calls on the full universe.
+  const watchSymbols=new Set(watchRows.map(row=>row.symbol));
+  const candidates=universe.filter(entry=>watchSymbols.has(entry.symbol));
   const confirmedRows:CatchReversalRow[]=[];
-  for(const group of chunks(universe,BATCH_SIZE)){ confirmedRows.push(...await fetchGroup(group,h,clock.isOpen,sessionRange,historyStart,historyEnd,sessionIsoDate)); }
+  for(const group of chunks(candidates,BATCH_SIZE)){ confirmedRows.push(...await fetchGroup(group,h,clock.isOpen,sessionRange,historyStart,historyEnd,sessionIsoDate)); }
   // Confirmed bounce/rejection rows take precedence over watchlist rows for the same instrument.
   const confirmedSymbols=new Set(confirmedRows.map(row=>row.symbol));
   const all=[...confirmedRows,...watchRows.filter(row=>!confirmedSymbols.has(row.symbol))];
   // Expiry is selected per underlying from Nubra's actual monthly contract calendar.
-  const firstChain=await getChain(universe[0],h); const expiry=firstChain?.expiry??getNextMonthlyExpiry(firstChain?.all_expiries??[]);
+  const expirySource=await getChain(candidates[0]??universe[0],h);
+  const expiry=expirySource?.expiry??getNextMonthlyExpiry(expirySource?.all_expiries??[]);
   return {items:all,clock,expiry,tradingDate,batchSize:BATCH_SIZE,universeCount:universe.length,loadedCount:all.length,watchlistCount:watchRows.length,confirmedCount:confirmedRows.length};
 }

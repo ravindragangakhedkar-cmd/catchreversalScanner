@@ -146,7 +146,7 @@ export async function fetchNubraChartFresh(
   const sessionDate = getLastCompletedWeekdayDate();
   const sessionRange = getIstSessionUtcRange(sessionDate);
   const startDate = interval === '1d'
-    ? `${new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(4, 6)) - 1, Number(today.slice(6, 8)) - historyDays)).toISOString().slice(0, 10)}T00:00:00.000Z`
+    ? new Date(Date.now() - historyDays * 24 * 60 * 60 * 1000).toISOString()
     : interval === '1h'
       ? `${new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()}`
       : sessionRange.start;

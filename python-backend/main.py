@@ -452,16 +452,23 @@ def option_chain(instrument: str, exchange: str = "NSE", expiry: str | None = No
             raise ValueError("Nubra returned an empty option-chain response.")
         symbol_by_ref: dict[str, str] = {}
         try:
-            from nubra_python_sdk.refdata.instruments import InstrumentData
-            master = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
+            cached = _instrument_master_cache.get(exchange)
+            if cached and time.time() - cached[0] < INSTRUMENT_CACHE_SECONDS:
+                master = cached[1]
+            else:
+                from nubra_python_sdk.refdata.instruments import InstrumentData
+                master = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
+                if master is not None:
+                    _instrument_master_cache[exchange] = (time.time(), master.copy())
             if master is not None and not master.empty and "ref_id" in master.columns and "stock_name" in master.columns:
-                symbol_by_ref = {
-                    str(row["ref_id"]): str(row["stock_name"])
-                    for _, row in master[["ref_id", "stock_name"]].dropna().iterrows()
-                }
+                symbol_by_ref = {str(row["ref_id"]): str(row["stock_name"]) for _, row in master[["ref_id", "stock_name"]].dropna().iterrows()}
         except Exception:
-            # The chain remains useful for snapshot data even if contract-name mapping fails.
             symbol_by_ref = {}
+        underlying_snapshot = None
+        try:
+            underlying_snapshot = md.current_price(instrument.strip().upper(), exchange=exchange)
+        except Exception:
+            underlying_snapshot = None
         return {
             "exchange": exchange,
             "instrument": instrument.strip().upper(),
@@ -469,6 +476,7 @@ def option_chain(instrument: str, exchange: str = "NSE", expiry: str | None = No
             "expiry": _json_value(_attr(chain, "expiry")),
             "all_expiries": [_json_value(x) for x in (_attr(chain, "all_expiries", []) or [])],
             "current_price": _json_value(_attr(chain, "current_price")),
+            "underlying_instrument": {"ltp": _json_value(_attr(underlying_snapshot, "price")), "prev_close": _json_value(_attr(underlying_snapshot, "prev_close"))} if underlying_snapshot is not None else None,
             "at_the_money_strike": _json_value(_attr(chain, "at_the_money_strike")),
             "ce": [_option_item(x, symbol_by_ref) for x in (_attr(chain, "ce", []) or [])],
             "pe": [_option_item(x, symbol_by_ref) for x in (_attr(chain, "pe", []) or [])],

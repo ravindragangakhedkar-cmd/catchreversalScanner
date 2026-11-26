@@ -131,11 +131,12 @@ async function fetchYahooChartFresh(
   }
 }
 
-async function fetchNubraChartFresh(
+export async function fetchNubraChartFresh(
   entry: StockUniverseEntry,
   range: '1y' | '3mo' | '1d',
   interval: '1d' | '1h' | '1m',
   brokerToken?: string,
+  historyDays = 365,
 ): Promise<{ bars: OhlcvBar[]; regularMarketPrice: number | null; previousClose: number } | null> {
   const { authToken, deviceId } = await getNubraCredentialsForSession(brokerToken);
   if (!authToken) return null;
@@ -145,7 +146,7 @@ async function fetchNubraChartFresh(
   const sessionDate = getLastCompletedWeekdayDate();
   const sessionRange = getIstSessionUtcRange(sessionDate);
   const startDate = interval === '1d'
-    ? `${new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(4, 6)) - 1, Number(today.slice(6, 8)) - 365)).toISOString().slice(0, 10)}T00:00:00.000Z`
+    ? `${new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(4, 6)) - 1, Number(today.slice(6, 8)) - historyDays)).toISOString().slice(0, 10)}T00:00:00.000Z`
     : interval === '1h'
       ? `${new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString()}`
       : sessionRange.start;

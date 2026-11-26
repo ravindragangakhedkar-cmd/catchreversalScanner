@@ -82,6 +82,36 @@ async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promi
  * Daily-level watchlist deliberately does not depend on option-chain availability.
  * It uses the latest completed daily close and the prior completed candle's classic pivots.
  */
+/** Shared daily OHLCV loader for scanners. Uses the exact multi-symbol Nubra request
+ * and extractBars parser already used by Catch Reversals, avoiding a second REST dialect.
+ */
+export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], brokerToken?:string):Promise<Map<string,Bar[]>> {
+  const creds=await getNubraCredentialsForSession(brokerToken);
+  if(!creds.authToken) throw new Error('Nubra session credentials are unavailable. Reconnect Nubra.');
+  const h=headers(creds.authToken,creds.deviceId);
+  const endDate=`${getIstSessionUtcRange(getLastCompletedWeekdayDate()).nextDay}T00:00:00.000Z`;
+  const startDate=new Date(Date.now()-400*24*60*60*1000).toISOString();
+  const output=new Map<string,Bar[]>();
+  for(const group of chunks(entries,BATCH_SIZE)){
+    const query=group.map(entry=>({
+      exchange:entry.symbol==='SENSEX'?'BSE':'NSE',
+      type:entry.isIndex?'INDEX':'STOCK',
+      values:[entry.symbol],
+      fields:['open','high','low','close','volume'],
+      interval:'1d',intraDay:false,startDate,endDate
+    }));
+    const payload=await postTimeseries(query,h);
+    for(const entry of group){
+      const bars=extractBars(payload,entry.symbol);
+      if(bars.length) output.set(entry.symbol,bars.map(b=>({
+        date:new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}),
+        timestamp:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume
+      })));
+    }
+  }
+  return output;
+}
+
 async function fetchDailyWatchlist(entries:StockUniverseEntry[], h:Record<string,string>, historyStart:string, historyEnd:string, sessionIsoDate:string):Promise<CatchReversalRow[]> {
   const out:CatchReversalRow[]=[];
   for(const group of chunks(entries,BATCH_SIZE)){

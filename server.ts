@@ -279,16 +279,12 @@ app.get('/api/nubra/option-chain',async(req,res)=>{
 });
 
 // Catch Reversals — Nubra Finance, dynamic India trading date and next monthly expiry; max five instruments per batch.
-app.get('/api/market/scan-catch-reversals', async (req, res) => {
+app.get('/api/market/scan-catch-reversals', async (_req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    const token = extractBrokerToken(req);
-    const session = await getBrokerSessionByToken(token);
-    if (!session?.connected || session.provider !== 'nubra' || !session.nubraLiveAuth) {
-      res.status(401).json({ error: 'Connect a live Nubra Finance session on Broker Connect before running Catch Reversals.' });
-      return;
-    }
-    res.json(await getCatchReversals(token));
+    // All Catch Reversals market data, including the option chain, now uses
+    // the separately authenticated Nubra Python SDK service.
+    res.json(await getCatchReversals());
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message : 'Catch Reversals scan failed.' });
   }

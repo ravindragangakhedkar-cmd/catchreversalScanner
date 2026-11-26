@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { CheckCircle2, Link2, RefreshCw, ShieldCheck } from 'lucide-react';
 import type { AppPage } from '../components/TopNav';
+import { useAuth } from '../context/AuthContext';
 
 type AuthResult = {
   authenticated?: boolean;
@@ -9,14 +10,14 @@ type AuthResult = {
 };
 
 export function BrokerConnectPage({ onNavigate }: { onNavigate?: (page: AppPage) => void }) {
+  const { nubraConnected: connected, setNubraConnected } = useAuth();
   const [loading, setLoading] = useState(false);
-  const [connected, setConnected] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleConnect = async () => {
     setLoading(true);
-    setConnected(false);
+    setNubraConnected(false);
     setStatusMessage(null);
     setErrorMsg(null);
     try {
@@ -31,13 +32,19 @@ export function BrokerConnectPage({ onNavigate }: { onNavigate?: (page: AppPage)
       if (!response.ok || payload.authenticated !== true) {
         throw new Error(payload.error || payload.detail || 'Nubra TOTP authentication could not be verified.');
       }
-      setConnected(true);
+      setNubraConnected(true);
       setStatusMessage('Nubra authenticated successfully through the Render Python service using your saved TOTP secret.');
     } catch (error) {
       setErrorMsg(error instanceof Error ? error.message : 'Unable to verify Nubra authentication.');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleDisconnect = () => {
+    setNubraConnected(false);
+    setStatusMessage('Nubra connection paused. Scanners will remain stopped until you connect again.');
+    setErrorMsg(null);
   };
 
   return (
@@ -83,6 +90,7 @@ export function BrokerConnectPage({ onNavigate }: { onNavigate?: (page: AppPage)
               {loading ? 'Verifying Nubra…' : connected ? 'Verify connection again' : 'Connect Nubra using TOTP'}
             </button>
             {connected && <button type="button" onClick={() => onNavigate?.('catch-reversals')} className="rounded-lg border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700">Open Catch Reversals Scanner</button>}
+            {connected && <button type="button" onClick={handleDisconnect} className="rounded-lg border border-rose-200 px-5 py-3 text-sm font-semibold text-rose-700">Disconnect scanners</button>}
           </div>
         </div>
       </section>

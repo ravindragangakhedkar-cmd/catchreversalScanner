@@ -158,9 +158,9 @@ async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promi
  * and extractBars parser already used by Catch Reversals, avoiding a second REST dialect.
  */
 export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], brokerToken?:string):Promise<Map<string,Bar[]>> {
-  const creds=await getNubraCredentialsForSession(brokerToken);
-  if(!creds.authToken) throw new Error('Nubra session credentials are unavailable. Reconnect Nubra.');
-  const h=headers(creds.authToken,creds.deviceId);
+  // Historical data is fetched by the separately hosted official Nubra Python SDK service.
+  // Browser OTP tokens are deliberately not passed to the Python SDK process.
+  const h:Record<string,string>={};
   const endDate=`${getIstSessionUtcRange(getLastCompletedWeekdayDate()).nextDay}T00:00:00.000Z`;
   const startDate=new Date(Date.now()-400*24*60*60*1000).toISOString();
   const output=new Map<string,Bar[]>();

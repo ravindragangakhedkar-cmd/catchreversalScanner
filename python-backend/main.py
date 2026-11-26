@@ -394,15 +394,20 @@ def generic_history(request: GenericHistoricalRequest):
         raise HTTPException(status_code=502, detail=f"Nubra historical {request.instrument_type} data failed: {type(exc).__name__}: {exc}") from exc
 
 
-def _option_item(option: Any) -> dict[str, Any]:
+def _option_item(option: Any, symbol_by_ref: dict[str, str] | None = None) -> dict[str, Any]:
     fields = (
         "ref_id", "timestamp", "strike_price", "lot_size",
         "last_traded_price", "last_traded_price_change",
-        "open_interest", "volume", "iv", "delta", "gamma", "theta", "vega",
-        "symbol", "trading_symbol"
+        "open_interest", "open_interest_change", "volume",
+        "iv", "delta", "gamma", "theta", "vega"
     )
-    return {field: _json_value(_attr(option, field)) for field in fields
-            if _attr(option, field, None) is not None}
+    result = {field: _json_value(_attr(option, field)) for field in fields
+              if _attr(option, field, None) is not None}
+    ref_id = _attr(option, "ref_id")
+    symbol = (symbol_by_ref or {}).get(str(ref_id)) if ref_id is not None else None
+    if symbol:
+        result["symbol"] = symbol
+    return result
 
 
 @app.get("/v1/option-chain", dependencies=[Depends(_authorize)])
@@ -416,6 +421,18 @@ def option_chain(instrument: str, exchange: str = "NSE", expiry: str | None = No
         chain = _attr(result, "chain")
         if chain is None:
             raise ValueError("Nubra returned an empty option-chain response.")
+        symbol_by_ref: dict[str, str] = {}
+        try:
+            from nubra_python_sdk.refdata.instruments import InstrumentData
+            master = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
+            if master is not None and not master.empty and "ref_id" in master.columns and "stock_name" in master.columns:
+                symbol_by_ref = {
+                    str(row["ref_id"]): str(row["stock_name"])
+                    for _, row in master[["ref_id", "stock_name"]].dropna().iterrows()
+                }
+        except Exception:
+            # The chain remains useful for snapshot data even if contract-name mapping fails.
+            symbol_by_ref = {}
         return {
             "exchange": exchange,
             "instrument": instrument.strip().upper(),
@@ -424,8 +441,8 @@ def option_chain(instrument: str, exchange: str = "NSE", expiry: str | None = No
             "all_expiries": [_json_value(x) for x in (_attr(chain, "all_expiries", []) or [])],
             "current_price": _json_value(_attr(chain, "current_price")),
             "at_the_money_strike": _json_value(_attr(chain, "at_the_money_strike")),
-            "ce": [_option_item(x) for x in (_attr(chain, "ce", []) or [])],
-            "pe": [_option_item(x) for x in (_attr(chain, "pe", []) or [])],
+            "ce": [_option_item(x, symbol_by_ref) for x in (_attr(chain, "ce", []) or [])],
+            "pe": [_option_item(x, symbol_by_ref) for x in (_attr(chain, "pe", []) or [])],
         }
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Nubra option chain failed: {type(exc).__name__}: {exc}") from exc

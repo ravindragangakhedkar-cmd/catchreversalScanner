@@ -74,6 +74,17 @@ function toEpochMilliseconds(raw:unknown):number|null {
   else value=Math.floor(value);
   return Number.isFinite(value) && Number.isFinite(new Date(value).getTime()) ? value : null;
 }
+function toIstDateString(timestamp:number):string {
+  const date=new Date(timestamp);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(date.getTime())) throw new Error(`Invalid Nubra candle timestamp: ${String(timestamp)}`);
+  const parts=new Intl.DateTimeFormat('en-GB',{
+    timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'
+  }).formatToParts(date);
+  const part=(type:string)=>parts.find(p=>p.type===type)?.value;
+  const year=part('year'),month=part('month'),day=part('day');
+  if(!year||!month||!day) throw new Error('Could not format Nubra candle date in Asia/Kolkata.');
+  return `${year}-${month}-${day}`;
+}
 function extractBars(payload:any, symbol:string):Bar[] {
   const root=payload?.result?.find?.((r:any)=>r?.values?.some?.((v:any)=>v?.[symbol])) ?? payload?.result?.[0];
   const values=root?.values?.find?.((v:any)=>v?.[symbol])?.[symbol] ?? root?.values?.[0]?.[symbol];
@@ -156,7 +167,7 @@ export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], broker
           const singlePayload=await postTimeseries(singleQuery,h);
           const bars=extractBars(singlePayload,entry.symbol);
           if(bars.length) output.set(entry.symbol,bars.map(b=>({
-            date:new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}),
+            date:toIstDateString(b.ts),
             timestamp:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume
           })));
         } catch (singleError) {
@@ -170,7 +181,7 @@ export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], broker
     for(const entry of group){
       const bars=extractBars(payload,entry.symbol);
       if(bars.length) output.set(entry.symbol,bars.map(b=>({
-        date:new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}),
+        date:toIstDateString(b.ts),
         timestamp:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume
       })));
     }
@@ -192,7 +203,7 @@ async function fetchDailyWatchlist(entries:StockUniverseEntry[], h:Record<string
     try{data=await postTimeseries(query,h);}catch{continue;}
     for(const entry of group){
       const bars=extractBars(data,entry.symbol)
-        .filter(b=>new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})<=sessionIsoDate);
+        .filter(b=>toIstDateString(b.ts)<=sessionIsoDate);
       if(bars.length<2)continue;
       const latest=bars.at(-1)!;
       const previous=bars.at(-2)!;
@@ -254,7 +265,7 @@ async function fetchGroup(entries:StockUniverseEntry[], h:Record<string,string>,
       const pctFromOpen=(v:any)=>{const opens=v?.open??[],closes=v?.close??[];const first=num(opens[0]?.v),last=num(closes.at(-1)?.v);return first&&last?pct(last/100,first/100):null;};
       const callChange=pctFromOpen(cv),putChange=pctFromOpen(pv);
       const bars=extractBars(data,item.entry.symbol); if(bars.length<30)continue;
-      const completed=bars.filter(b=>new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})<=sessionIsoDate); if(completed.length<25)continue;
+      const completed=bars.filter(b=>toIstDateString(b.ts)<=sessionIsoDate); if(completed.length<25)continue;
       const prev=completed.at(-2)!; const today=completed.at(-1)!; const lv=pivots(prev);
       const spot=item.spot;
       // Daily support/resistance levels are calculated from the previous completed daily candle.

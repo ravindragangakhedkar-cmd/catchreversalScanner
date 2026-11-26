@@ -224,3 +224,208 @@ def historical(request: HistoricalRequest):
         "interval": request.interval,
         "sdk": "nubra-sdk",
     }
+
+
+# Generic instrument discovery and market-data endpoints. These use the same
+# authenticated SDK client as the scanner candle loader.
+class GenericHistoricalRequest(BaseModel):
+    exchange: str = Field(default="NSE", pattern="^(NSE|BSE|MCX)$")
+    instrument_type: str = Field(pattern="^(STOCK|INDEX|FUT|OPT)$")
+    symbols: list[str] = Field(min_length=1, max_length=5)
+    fields: list[str] = Field(default_factory=lambda: [
+        "open", "high", "low", "close", "cumulative_volume"
+    ], min_length=1, max_length=30)
+    start_date: str
+    end_date: str
+    interval: str = "1d"
+    intraday: bool = False
+    realtime: bool = False
+
+
+def _json_value(value: Any):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
+def _field_series(chart: Any, field: str) -> list[dict[str, Any]]:
+    points = _attr(chart, field, None)
+    rows = []
+    price_fields = {"open", "high", "low", "close", "l1bid", "l1ask"}
+    for point in points or []:
+        raw_ts = _attr(point, "timestamp")
+        raw_value = _attr(point, "value")
+        try:
+            timestamp_ns = int(raw_ts)
+            value = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if timestamp_ns <= 0:
+            continue
+        timestamp_ms = timestamp_ns // 1_000_000
+        if field in price_fields:
+            value /= 100.0
+        date = datetime.fromtimestamp(
+            timestamp_ms / 1000, tz=timezone.utc
+        ).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
+        rows.append({"timestamp": timestamp_ms, "date": date, "value": value})
+    return rows
+
+
+@app.get("/v1/instruments", dependencies=[Depends(_authorize)])
+def instruments(
+    exchange: str = "NSE",
+    asset: str | None = None,
+    derivative_type: str | None = None,
+    expiry: str | None = None,
+    option_type: str | None = None,
+    symbol: str | None = None,
+    limit: int = 500,
+):
+    if exchange not in {"NSE", "BSE", "MCX"}:
+        raise HTTPException(status_code=400, detail="exchange must be NSE, BSE or MCX.")
+    if derivative_type and derivative_type not in {"STOCK", "FUT", "OPT"}:
+        raise HTTPException(status_code=400, detail="derivative_type must be STOCK, FUT or OPT.")
+    if option_type and option_type not in {"CE", "PE"}:
+        raise HTTPException(status_code=400, detail="option_type must be CE or PE.")
+    if limit < 1 or limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 5000.")
+
+    try:
+        from nubra_python_sdk.refdata.instruments import InstrumentData
+        frame = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
+        if frame is None or frame.empty:
+            return {"exchange": exchange, "count": 0, "items": []}
+
+        selected = frame.copy()
+        filters = {
+            "asset": asset,
+            "derivative_type": derivative_type,
+            "option_type": option_type,
+        }
+        for column, expected in filters.items():
+            if expected is not None and column in selected.columns:
+                selected = selected[selected[column].astype(str).str.upper() == expected.upper()]
+        if expiry is not None and "expiry" in selected.columns:
+            selected = selected[selected["expiry"].astype(str).str.replace(r"\\.0$", "", regex=True) == expiry]
+        if symbol is not None:
+            search = symbol.strip().upper()
+            cols = [c for c in ("stock_name", "asset", "nubra_name") if c in selected.columns]
+            mask = False
+            for column in cols:
+                mask = mask | selected[column].astype(str).str.upper().str.contains(search, regex=False)
+            selected = selected[mask]
+
+        columns = [
+            "ref_id", "token", "stock_name", "nubra_name", "asset", "exchange",
+            "derivative_type", "asset_type", "expiry", "strike_price",
+            "option_type", "lot_size", "tick_size", "isin"
+        ]
+        columns = [c for c in columns if c in selected.columns]
+        rows = []
+        for record in selected[columns].head(limit).to_dict(orient="records"):
+            rows.append({k: _json_value(v) for k, v in record.items()})
+        return {"exchange": exchange, "count": len(rows), "items": rows}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nubra instrument master failed: {type(exc).__name__}: {exc}") from exc
+
+
+@app.post("/v1/history", dependencies=[Depends(_authorize)])
+def generic_history(request: GenericHistoricalRequest):
+    allowed_intervals = {"1s", "1m", "2m", "3m", "5m", "15m", "30m", "1h", "1d", "1w", "1mth"}
+    if request.interval not in allowed_intervals:
+        raise HTTPException(status_code=400, detail="Unsupported interval.")
+    try:
+        start = datetime.fromisoformat(request.start_date.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(request.end_date.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="start_date and end_date must be ISO-8601 timestamps.") from exc
+    if end <= start:
+        raise HTTPException(status_code=400, detail="end_date must be later than start_date.")
+
+    try:
+        from nubra_python_sdk.marketdata.market_data import MarketData
+        md = MarketData(_get_sdk())
+        response = md.historical_data({
+            "exchange": request.exchange,
+            "type": request.instrument_type,
+            "values": [x.strip().upper() for x in request.symbols],
+            "fields": request.fields,
+            "startDate": start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "endDate": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "interval": request.interval,
+            "intraDay": request.intraday,
+            "realTime": request.realtime,
+        })
+        items = {}
+        for group in (_attr(response, "result", []) or []):
+            for instrument_dict in (_attr(group, "values", []) or []):
+                if not isinstance(instrument_dict, dict):
+                    continue
+                for symbol, chart in instrument_dict.items():
+                    items[str(symbol).strip().upper()] = {
+                        field: _field_series(chart, field)
+                        for field in request.fields
+                        if _attr(chart, field, None) is not None
+                    }
+        return {
+            "exchange": request.exchange,
+            "instrument_type": request.instrument_type,
+            "interval": request.interval,
+            "items": items,
+            "loaded_count": len(items),
+            "requested_count": len(request.symbols),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nubra historical {request.instrument_type} data failed: {type(exc).__name__}: {exc}") from exc
+
+
+def _option_item(option: Any) -> dict[str, Any]:
+    fields = (
+        "ref_id", "timestamp", "strike_price", "lot_size",
+        "last_traded_price", "last_traded_price_change",
+        "open_interest", "volume", "iv", "delta", "gamma", "theta", "vega",
+        "symbol", "trading_symbol"
+    )
+    return {field: _json_value(_attr(option, field)) for field in fields
+            if _attr(option, field, None) is not None}
+
+
+@app.get("/v1/option-chain", dependencies=[Depends(_authorize)])
+def option_chain(instrument: str, exchange: str = "NSE", expiry: str | None = None):
+    if exchange not in {"NSE", "BSE", "MCX"}:
+        raise HTTPException(status_code=400, detail="exchange must be NSE, BSE or MCX.")
+    try:
+        from nubra_python_sdk.marketdata.market_data import MarketData
+        md = MarketData(_get_sdk())
+        result = md.option_chain(instrument.strip().upper(), expiry=expiry, exchange=exchange) if expiry else md.option_chain(instrument.strip().upper(), exchange=exchange)
+        chain = _attr(result, "chain")
+        if chain is None:
+            raise ValueError("Nubra returned an empty option-chain response.")
+        return {
+            "exchange": exchange,
+            "instrument": instrument.strip().upper(),
+            "asset": _json_value(_attr(chain, "asset")),
+            "expiry": _json_value(_attr(chain, "expiry")),
+            "all_expiries": [_json_value(x) for x in (_attr(chain, "all_expiries", []) or [])],
+            "current_price": _json_value(_attr(chain, "current_price")),
+            "at_the_money_strike": _json_value(_attr(chain, "at_the_money_strike")),
+            "ce": [_option_item(x) for x in (_attr(chain, "ce", []) or [])],
+            "pe": [_option_item(x) for x in (_attr(chain, "pe", []) or [])],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Nubra option chain failed: {type(exc).__name__}: {exc}") from exc

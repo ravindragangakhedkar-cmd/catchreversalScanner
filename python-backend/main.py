@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import pyotp
@@ -115,7 +116,7 @@ def _chart_to_bars(chart: Any) -> list[dict[str, float | int]]:
         if all(k in row for k in ("open", "high", "low", "close")):
             bars.append({
                 "timestamp": ts,
-                "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).astimezone().strftime("%Y-%m-%d"),
+                "date": datetime.fromtimestamp(ts / 1000, tz=timezone.utc).astimezone(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d"),
                 "open": float(row["open"]),
                 "high": float(row["high"]),
                 "low": float(row["low"]),

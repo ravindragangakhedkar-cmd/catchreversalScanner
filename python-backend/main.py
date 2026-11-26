@@ -20,8 +20,6 @@ app = FastAPI(title="Catch Reversals Nubra SDK Service", version="1.0.0")
 _sdk_lock = threading.RLock()
 _sdk_client: Any | None = None
 _sdk_created_at = 0.0
-_instrument_master_cache: dict[str, tuple[float, Any]] = {}
-INSTRUMENT_CACHE_SECONDS = 900
 SDK_MAX_AGE_SECONDS = 6 * 60 * 60
 
 
@@ -148,11 +146,24 @@ def health():
     return {"ok": True, "service": "nubra-python-sdk", "sdk_authenticated": _sdk_client is not None}
 
 
-@app.get("/v1/auth-status")
+
+@app.get("/v1/auth-status", dependencies=[Depends(_authorize)])
 def auth_status():
-    """Trigger Nubra SDK login using the server-side TOTP secret and report status."""
-    _get_sdk()
-    return {"authenticated": True, "method": "totp", "service": "nubra-python-sdk"}
+    """Initialize/reuse the Nubra SDK session and report the result."""
+    try:
+        _get_sdk()
+        return {
+            "authenticated": True,
+            "method": "totp",
+            "service": "nubra-python-sdk",
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Nubra authentication check failed: {type(exc).__name__}: {exc}",
+        ) from exc
 
 
 @app.post("/v1/historical", dependencies=[Depends(_authorize)])
@@ -315,17 +326,14 @@ def instruments(
 
     try:
         from nubra_python_sdk.refdata.instruments import InstrumentData
-        cached = _instrument_master_cache.get(exchange)
-        if cached and time.time() - cached[0] < INSTRUMENT_CACHE_SECONDS:
-            frame = cached[1].copy()
-        else:
-            frame = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
-            if frame is not None:
-                _instrument_master_cache[exchange] = (time.time(), frame.copy())
+        # Do not retain or duplicate the full instrument master in a 512 MB
+        # container. Fetch it for this request and filter the original frame.
+        frame = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
         if frame is None or frame.empty:
             return {"exchange": exchange, "count": 0, "items": []}
 
-        selected = frame.copy()
+        selected = frame
+        del frame  # release the extra reference so filtered frames can be reclaimed
         if asset is not None and "asset" in selected.columns:
             selected = selected[selected["asset"].astype(str).str.upper() == asset.upper()]
         if derivative_type == "STOCK":
@@ -460,20 +468,10 @@ def option_chain(instrument: str, exchange: str = "NSE", expiry: str | None = No
         chain = _attr(result, "chain")
         if chain is None:
             raise ValueError("Nubra returned an empty option-chain response.")
+        # Avoid loading the full NSE/BSE instrument master just to decorate
+        # option-chain rows. The option-chain response itself remains complete;
+        # the optional symbol label is simply omitted when unavailable.
         symbol_by_ref: dict[str, str] = {}
-        try:
-            cached = _instrument_master_cache.get(exchange)
-            if cached and time.time() - cached[0] < INSTRUMENT_CACHE_SECONDS:
-                master = cached[1]
-            else:
-                from nubra_python_sdk.refdata.instruments import InstrumentData
-                master = InstrumentData(_get_sdk()).get_instruments_dataframe(exchange=exchange)
-                if master is not None:
-                    _instrument_master_cache[exchange] = (time.time(), master.copy())
-            if master is not None and not master.empty and "ref_id" in master.columns and "stock_name" in master.columns:
-                symbol_by_ref = {str(row["ref_id"]): str(row["stock_name"]) for _, row in master[["ref_id", "stock_name"]].dropna().iterrows()}
-        except Exception:
-            symbol_by_ref = {}
         underlying_snapshot = None
         try:
             underlying_snapshot = md.current_price(instrument.strip().upper(), exchange=exchange)

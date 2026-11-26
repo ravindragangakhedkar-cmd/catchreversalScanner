@@ -15,19 +15,20 @@ Never commit these values to GitHub or send them in chat. The service reuses one
 
 ## Deploy
 
-Use Render Blueprint deployment with this folder's `render.yaml`. Set the three Nubra variables in the Render dashboard. Copy the generated `SERVICE_API_KEY` and the deployed service URL into Vercel as `NUBRA_PYTHON_API_KEY` and `NUBRA_PYTHON_API_URL`.
+Use Render Blueprint deployment from the repository root. The `render.yaml` file is in the repository root and points the service `rootDir` to `python-backend`. Set the three Nubra variables in the Render dashboard. Copy the generated `SERVICE_API_KEY` and the deployed service URL into Vercel as `NUBRA_PYTHON_API_KEY` and `NUBRA_PYTHON_API_URL`.
 
 The Render service is separate from the Vercel frontend because Vercel's Node.js runtime does not execute the Python SDK.
 
 ## API (all require `x-service-key`, except `/health`)
 
 - `GET /health` — health check.
+- `GET /v1/indices` — Nubra public index master, separate from tradable instruments.
 - `GET /v1/instruments?exchange=NSE&asset=RELIANCE&derivative_type=FUT` — current instrument master, filtered by underlying, expiry, CE/PE and derivative type. Exchanges: NSE, BSE, MCX.
 - `GET /v1/current-price?instrument=RELIANCE&exchange=NSE` — latest price and previous close.
 - `POST /v1/history` — generic historical series for up to five symbols. `instrument_type` can be `STOCK`, `INDEX`, `FUT` or `OPT`; choose fields such as OHLC, volume, OI, IV and Greeks supported for that instrument.
 - `GET /v1/option-chain?instrument=NIFTY&exchange=NSE` — chain snapshot, expiries, ATM strike and CE/PE strike data.
 - `POST /v1/historical` — compatibility endpoint used by existing scanner candle calculations.
 
-The matching Vercel proxies are `/api/nubra/instruments`, `/api/nubra/current-price`, `/api/nubra/history` and `/api/nubra/option-chain`. The service is read-only: it fetches market data and does not place orders.
+The matching Vercel proxies are `/api/nubra/indices`, `/api/nubra/instruments`, `/api/nubra/current-price`, `/api/nubra/history` and `/api/nubra/option-chain`. The service is read-only: it fetches market data and does not place orders.
 
 Historical data is limited by Nubra to five instruments per request and 60 calls per minute. Intraday history generally has a shorter retention window; the API validates the requested interval and uses UTC timestamps.

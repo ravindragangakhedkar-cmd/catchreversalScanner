@@ -264,6 +264,13 @@ app.get('/api/nubra/indices',async(req,res)=>{
   } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra index master lookup failed.'}); }
 });
 
+app.get('/api/nubra/auth-status',async(_req,res)=>{
+  try {
+    res.setHeader('Cache-Control','no-store');
+    res.json(await nubraPythonFetch('/v1/auth-status'));
+  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra TOTP authentication check failed.'}); }
+});
+
 app.get('/api/nubra/current-price',async(req,res)=>{
   try {
     const instrument=typeof req.query.instrument==='string'?req.query.instrument.trim():'';

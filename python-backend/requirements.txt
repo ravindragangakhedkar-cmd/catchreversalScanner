@@ -1,0 +1,5 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+nubra-sdk==0.5.4
+pyotp==2.9.0
+pandas==2.2.3

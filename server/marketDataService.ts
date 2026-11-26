@@ -162,9 +162,31 @@ export async function fetchNubraChartFresh(
       cache: 'no-store', signal: AbortSignal.timeout(15000),
     });
     if (!response.ok) return null;
-    const json = await response.json() as { result?: Array<{ values?: Array<Record<string, Record<string, Array<{ ts: number; v: number }>>>> }> };
-    const block = json.result?.[0]?.values?.[0]?.[entry.symbol];
-    if (!block) return null;
+    const json = await response.json() as any;
+    // Nubra has returned the same chart payload in more than one wrapper shape.
+    // Resolve the requested symbol recursively instead of assuming result[0].values[0].
+    const findSymbolBlock = (node: any, depth = 0): any => {
+      if (!node || typeof node !== 'object' || depth > 8) return null;
+      if (!Array.isArray(node)) {
+        const direct = node[entry.symbol] ?? node[entry.symbol.toUpperCase()] ?? node[entry.symbol.toLowerCase()];
+        if (direct && typeof direct === 'object' && (Array.isArray(direct.close) || Array.isArray(direct.open))) return direct;
+        for (const value of Object.values(node)) {
+          const found = findSymbolBlock(value, depth + 1);
+          if (found) return found;
+        }
+      } else {
+        for (const value of node) {
+          const found = findSymbolBlock(value, depth + 1);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+    const block = findSymbolBlock(json);
+    if (!block) {
+      console.warn(`[Nubra chart] ${entry.symbol}: symbol block missing; response keys=${JSON.stringify(Object.keys(json ?? {}))}`);
+      return null;
+    }
     const map = new Map<number, Partial<OhlcvBar>>();
     for (const field of ['open', 'high', 'low', 'close', 'volume'] as const) {
       for (const point of block[field] ?? []) {

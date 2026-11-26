@@ -148,6 +148,13 @@ def health():
     return {"ok": True, "service": "nubra-python-sdk", "sdk_authenticated": _sdk_client is not None}
 
 
+@app.get("/v1/auth-status")
+def auth_status():
+    """Trigger Nubra SDK login using the server-side TOTP secret and report status."""
+    _get_sdk()
+    return {"authenticated": True, "method": "totp", "service": "nubra-python-sdk"}
+
+
 @app.post("/v1/historical", dependencies=[Depends(_authorize)])
 def historical(request: HistoricalRequest):
     if request.interval not in {"1d", "1w", "1m", "3m", "5m", "15m", "30m", "1h"}:

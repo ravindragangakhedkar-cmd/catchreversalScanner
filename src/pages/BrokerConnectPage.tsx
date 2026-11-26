@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import { CheckCircle2, KeyRound, Link2, Lock, Smartphone, Unplug } from 'lucide-react';
-import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import { useAuth } from '../context/AuthContext';
-import { OperationType, db, handleFirestoreError } from '../lib/firebase';
 import { AuthGatePage } from '../components/AuthGatePage';
 import type { AppPage } from '../components/TopNav';
 
@@ -87,33 +85,7 @@ export function BrokerConnectPage({ onNavigate }: { onNavigate?: (page: AppPage)
         };
       };
 
-      // Save non-sensitive broker connection metadata to Firestore (never storing raw MPIN)
-      const connPath = `users/${user.uid}/brokerConnections/primary`;
-      const connRef = doc(db, 'users', user.uid, 'brokerConnections', 'primary');
-      try {
-        const existingSnap = await getDoc(connRef);
-        if (existingSnap.exists()) {
-          await updateDoc(connRef, {
-            maskedMobile: session.maskedMobile,
-            clientCode: session.clientCode,
-            status: 'connected',
-            updatedAt: serverTimestamp(),
-          });
-        } else {
-          await setDoc(connRef, {
-            userId: user.uid,
-            brokerName: 'Broker',
-            maskedMobile: session.maskedMobile,
-            clientCode: session.clientCode,
-            status: 'connected',
-            connectedAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        }
-      } catch (fsErr) {
-        handleFirestoreError(fsErr, OperationType.WRITE, connPath);
-      }
-
+      // Retain the encrypted, self-contained broker token in this browser; no database is used.
       setBrokerSessionState(sessionToken, session);
       setChallengeId(null);
       setOtp('');
@@ -139,20 +111,6 @@ export function BrokerConnectPage({ onNavigate }: { onNavigate?: (page: AppPage)
         body: JSON.stringify({ userId: user.uid }),
       });
 
-      const connPath = `users/${user.uid}/brokerConnections/primary`;
-      const connRef = doc(db, 'users', user.uid, 'brokerConnections', 'primary');
-      try {
-        const snap = await getDoc(connRef);
-        if (snap.exists()) {
-          await updateDoc(connRef, {
-            status: 'disconnected',
-            updatedAt: serverTimestamp(),
-          });
-        }
-      } catch (fsErr) {
-        handleFirestoreError(fsErr, OperationType.UPDATE, connPath);
-      }
-
       setBrokerSessionState(null, null);
       setStatusMessage('Broker session disconnected.');
     } catch (err) {
@@ -175,7 +133,7 @@ export function BrokerConnectPage({ onNavigate }: { onNavigate?: (page: AppPage)
           Link your Broker account using your registered 10-digit mobile number and 4-digit MPIN,
           followed by 6-digit OTP verification.
         </p>
-        <p className="mt-2 text-xs text-slate-500 max-w-2xl">After verification, the encrypted Nubra session is retained server-side and restored automatically after reload when the session-store API key is configured.</p>
+        <p className="mt-2 text-xs text-slate-500 max-w-2xl">After manual OTP and MPIN verification, an encrypted Nubra session token is retained in this browser and restored after reload using BROKER_SESSION_SECRET.</p>
       </div>
 
       <div className="mt-8 grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
@@ -406,7 +364,7 @@ export function BrokerConnectPage({ onNavigate }: { onNavigate?: (page: AppPage)
               <li>
                 <span className="font-semibold text-slate-900">1. Mobile &amp; 4-digit MPIN:</span>{' '}
                 Your Broker credentials are validated over HTTPS and never stored in browser storage
-                or Firestore.
+                or browser local storage.
               </li>
               <li>
                 <span className="font-semibold text-slate-900">2. Mandatory OTP Verification:</span>{' '}

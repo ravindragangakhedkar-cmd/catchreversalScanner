@@ -1,7 +1,5 @@
 import React, { useState } from 'react';
 import { Building2, CheckCircle2, Mail, MapPin, Phone, Send, User } from 'lucide-react';
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { OperationType, db, handleFirestoreError } from '../lib/firebase';
 import { OFFICIAL_MERCHANT_EMAIL } from '../../shared/types';
 
 export function ContactPage() {
@@ -19,8 +17,6 @@ export function ContactPage() {
     setSubmittedRef(null);
     setSubmitting(true);
 
-    const inquiryId = `inq_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-    const path = `contactInquiries/${inquiryId}`;
 
     try {
       const cleanName = name.trim().slice(0, 100);
@@ -33,15 +29,6 @@ export function ContactPage() {
       if (cleanPhone.length < 6) throw new Error('Please enter a valid phone number.');
       if (cleanMessage.length < 5) throw new Error('Please enter your inquiry message.');
 
-      await setDoc(doc(db, 'contactInquiries', inquiryId), {
-        name: cleanName,
-        email: cleanEmail,
-        phone: cleanPhone,
-        message: cleanMessage,
-        routedTo: OFFICIAL_MERCHANT_EMAIL,
-        createdAt: serverTimestamp(),
-      });
-
       const res = await fetch('/api/contact/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -52,17 +39,14 @@ export function ContactPage() {
           message: cleanMessage,
         }),
       });
-      const json = (await res.json().catch(() => ({}))) as { referenceId?: string };
-
-      setSubmittedRef(json.referenceId || inquiryId);
+      const json = (await res.json().catch(() => ({}))) as { referenceId?: string; error?: string };
+      if (!res.ok) throw new Error(json.error || 'Unable to send inquiry.');
+      setSubmittedRef(json.referenceId || `CORR-${Date.now()}`);
       setName('');
       setEmail('');
       setPhone('');
       setMessage('');
     } catch (err) {
-      if (err instanceof Error && err.message.includes('Missing or insufficient permissions')) {
-        handleFirestoreError(err, OperationType.CREATE, path);
-      }
       setErrorMsg(err instanceof Error ? err.message : 'Unable to send inquiry.');
     } finally {
       setSubmitting(false);

@@ -1,9 +1,7 @@
 import { getNSEMarketClockStatus, computeEMA, computeBBWPSeries } from '../shared/indicators.ts';
 import { INDEX_BASKET_UNIVERSE, NIFTY_500_FNO_UNIVERSE, type StockUniverseEntry } from '../shared/nifty500Universe.ts';
-import { getNubraCredentialsForSession } from './brokerService.ts';
 import { getIstSessionUtcRange, getIstTradingDate, getLastCompletedWeekdayDate, getNextMonthlyExpiry } from './marketDates.ts';
 
-const NUBRA_BASE = (() => { const raw = process.env.NUBRA_API_BASE_URL?.trim() || 'https://api.nubra.io'; try { const u = new URL(raw); return ['api.nubra.io','uatapi.nubra.io'].includes(u.hostname) && u.protocol === 'https:' ? u.origin : 'https://api.nubra.io'; } catch { return 'https://api.nubra.io'; } })();
 const BATCH_SIZE = 5;
 type Tick = { ts: number; v: number };
 type Bar = { ts: number; open: number; high: number; low: number; close: number; volume: number };
@@ -167,15 +165,41 @@ async function postTimeseries(query:any[], _authHeaders:Record<string,string>):P
   }
   return {result};
 }
-async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promise<any|null>{
+async function getChain(entry:StockUniverseEntry, _headers:Record<string,string>):Promise<any|null>{
+  const serviceUrl=process.env.NUBRA_PYTHON_API_URL?.trim();
+  const serviceKey=process.env.NUBRA_PYTHON_API_KEY?.trim();
+  if(!serviceUrl||!serviceKey) throw new Error('Nubra Python SDK service is not configured in Vercel.');
   const exchange=entry.symbol==='SENSEX'?'BSE':'NSE';
-  const base=`${NUBRA_BASE}/optionchains/${encodeURIComponent(entry.symbol)}?exchange=${exchange}`;
-  const first=await fetch(base,{headers:h,cache:'no-store',signal:AbortSignal.timeout(12000)});
-  if(!first.ok)return null; const initial=await first.json() as Chain; if(!initial.chain)return null;
-  const expiry=getNextMonthlyExpiry(initial.chain.all_expiries??[]);
-  if(initial.chain.expiry===expiry)return initial.chain;
-  const selected=await fetch(`${base}&expiry=${expiry}`,{headers:h,cache:'no-store',signal:AbortSignal.timeout(12000)});
-  if(!selected.ok)return null; const result=await selected.json() as Chain; return result.chain??null;
+  const base=serviceUrl.replace(/\/$/,'');
+  const fetchChain=async(expiry?:string)=>{
+    const params=new URLSearchParams({instrument:entry.symbol,exchange});
+    if(expiry) params.set('expiry',expiry);
+    const response=await fetch(`${base}/v1/option-chain?${params.toString()}`,{
+      headers:{'x-service-key':serviceKey},cache:'no-store',signal:AbortSignal.timeout(30000)
+    });
+    const body=await response.json().catch(()=>({})) as any;
+    if(!response.ok) throw new Error(body.detail||`Nubra Python option-chain HTTP ${response.status}`);
+    return body;
+  };
+  const initial=await fetchChain();
+  const expiry=getNextMonthlyExpiry(initial.all_expiries??[]);
+  const selected=initial.expiry===expiry?initial:await fetchChain(expiry);
+  const map=(items:any[]) => (items??[]).map(x=>({
+    symbol:x.symbol,
+    sp:num(x.strike_price)??0,
+    ltp:num(x.last_traded_price)??0,
+    oi:num(x.open_interest)??0,
+    ltpchg:num(x.last_traded_price_change)
+  }));
+  return {
+    cp:num(selected.current_price)??0,
+    atm:num(selected.at_the_money_strike)??0,
+    expiry:selected.expiry,
+    all_expiries:selected.all_expiries??[],
+    ce:map(selected.ce),
+    pe:map(selected.pe),
+    underlying_instrument:{ltp:num(selected.current_price)??0}
+  };
 }
 /**
  * Daily-level watchlist deliberately does not depend on option-chain availability.
@@ -346,12 +370,11 @@ async function fetchGroup(entries:StockUniverseEntry[], h:Record<string,string>,
   }
   return rows;
 }
-export async function getCatchReversals(brokerToken?:string){
-  const clock=getNSEMarketClockStatus(); const creds=await getNubraCredentialsForSession(brokerToken);
+export async function getCatchReversals(_brokerToken?:string){
+  const clock=getNSEMarketClockStatus();
   const tradingDate=getIstTradingDate(); const sessionDate=getLastCompletedWeekdayDate(); const sessionIsoDate=`${sessionDate.slice(0,4)}-${sessionDate.slice(4,6)}-${sessionDate.slice(6,8)}`; const sessionRange=getIstSessionUtcRange(sessionDate);
   const historyStart=new Date(Date.now()-400*24*60*60*1000).toISOString(); const historyEnd=`${sessionRange.nextDay}T00:00:00.000Z`;
-  if(!creds.authToken) throw new Error('Connect Nubra Finance first to scan live option and market data.');
-  const h=headers(creds.authToken,creds.deviceId);
+  const h:Record<string,string>={};
   const universe=[...NIFTY_500_FNO_UNIVERSE.filter(x=>x.isFno),...INDEX_BASKET_UNIVERSE];
   // Always build the near-level watchlist from daily candles first; it has no option-chain dependency.
   const watchRows=await fetchDailyWatchlist(universe,h,historyStart,historyEnd,sessionIsoDate);

@@ -1,11 +1,12 @@
 import { getNSEMarketClockStatus, computeEMA, computeBBWPSeries } from '../shared/indicators.ts';
 import { INDEX_BASKET_UNIVERSE, NIFTY_500_FNO_UNIVERSE, type StockUniverseEntry } from '../shared/nifty500Universe.ts';
+import { getNubraCredentialsForSession } from './brokerService.ts';
 import { getIstSessionUtcRange, getIstTradingDate, getLastCompletedWeekdayDate, getNextMonthlyExpiry } from './marketDates.ts';
 
+const NUBRA_BASE = (() => { const raw = process.env.NUBRA_API_BASE_URL?.trim() || 'https://api.nubra.io'; try { const u = new URL(raw); return ['api.nubra.io','uatapi.nubra.io'].includes(u.hostname) && u.protocol === 'https:' ? u.origin : 'https://api.nubra.io'; } catch { return 'https://api.nubra.io'; } })();
 const BATCH_SIZE = 5;
 type Tick = { ts: number; v: number };
 type Bar = { ts: number; open: number; high: number; low: number; close: number; volume: number };
-type DailyBiasBar = { date: string; timestamp: number; open: number; high: number; low: number; close: number; volume: number };
 type Contract = { symbol?: string; sp?: number; ltp?: number; oi?: number; prev_oi?: number; ltpchg?: number };
 type Chain = { chain?: { cp?: number; atm?: number; expiry?: string; all_expiries?: string[]; ce?: Contract[]; pe?: Contract[]; underlying_instrument?: { ltp?: number; prev_close?: number } } };
 export type CatchReversalRow = {
@@ -55,153 +56,27 @@ function chopApprox(bars:Bar[],p=10):number {
   const w=bars.slice(-p),hi=Math.max(...w.map(x=>x.high)),lo=Math.min(...w.map(x=>x.low));
   return hi>lo&&trSum>0?100*Math.log10(trSum/(hi-lo))/Math.log10(p):50;
 }
-function toEpochMilliseconds(raw:unknown):number|null {
-  if (raw === null || raw === undefined || raw === '') return null;
-  let value:number;
-  if (typeof raw === 'number') value=raw;
-  else {
-    const text=String(raw).trim();
-    const numeric=Number(text);
-    value=Number.isFinite(numeric) && text!=='' ? numeric : Date.parse(text);
-  }
-  if (!Number.isFinite(value) || value<=0) return null;
-  // Nubra payloads may express candle time as seconds, milliseconds,
-  // microseconds, nanoseconds, or an ISO-8601 date string.
-  if (value >= 1e17) value=Math.floor(value/1e6);
-  else if (value >= 1e14) value=Math.floor(value/1e3);
-  else if (value < 1e11) value=Math.floor(value*1000);
-  else value=Math.floor(value);
-  return Number.isFinite(value) && Number.isFinite(new Date(value).getTime()) ? value : null;
-}
-function toIstDateString(timestamp:number):string {
-  const date=new Date(timestamp);
-  if (!Number.isFinite(timestamp) || !Number.isFinite(date.getTime())) throw new Error(`Invalid Nubra candle timestamp: ${String(timestamp)}`);
-  const parts=new Intl.DateTimeFormat('en-GB',{
-    timeZone:'Asia/Kolkata',year:'numeric',month:'2-digit',day:'2-digit'
-  }).formatToParts(date);
-  const part=(type:string)=>parts.find(p=>p.type===type)?.value;
-  const year=part('year'),month=part('month'),day=part('day');
-  if(!year||!month||!day) throw new Error('Could not format Nubra candle date in Asia/Kolkata.');
-  return `${year}-${month}-${day}`;
-}
 function extractBars(payload:any, symbol:string):Bar[] {
   const root=payload?.result?.find?.((r:any)=>r?.values?.some?.((v:any)=>v?.[symbol])) ?? payload?.result?.[0];
   const values=root?.values?.find?.((v:any)=>v?.[symbol])?.[symbol] ?? root?.values?.[0]?.[symbol];
-  const get=(key:string):any[]=>Array.isArray(values?.[key])?values[key]:[];
+  const get=(key:string):Tick[]=>Array.isArray(values?.[key])?values[key]:[];
   const map=new Map<number,Partial<Bar>>();
-  for(const key of ['open','high','low','close','volume']) {
-    for(const point of get(key)) {
-      const ts=toEpochMilliseconds(point?.ts ?? point?.timestamp ?? point?.time ?? point?.date);
-      const rawValue=Number(point?.v ?? point?.value);
-      if(ts===null || !Number.isFinite(rawValue)) continue;
-      const row=map.get(ts)??{ts};
-      (row as any)[key]=rawValue/100;
-      map.set(ts,row);
-    }
-  }
-  return [...map.values()]
-    .filter((b:any)=>Number.isFinite(b.ts)&&Number.isFinite(b.open)&&Number.isFinite(b.high)&&Number.isFinite(b.low)&&Number.isFinite(b.close)&&b.open>0&&b.high>0&&b.low>0&&b.close>0)
-    .map((b:any)=>({ts:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:Number.isFinite(b.volume)?b.volume:0}))
-    .sort((a,b)=>a.ts-b.ts);
+  for(const key of ['open','high','low','close','volume']) for(const t of get(key)){const ts=Number(t.ts);const row=map.get(ts)??{ts};(row as any)[key]=Number(t.v)/100;map.set(ts,row);}
+  return [...map.values()].filter((b:any)=>b.open&&b.high&&b.low&&b.close).map((b:any)=>({ts:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume??0})).sort((a,b)=>a.ts-b.ts);
 }
-async function postTimeseries(query:any[], _authHeaders:Record<string,string>):Promise<any> {
-  const serviceUrl=process.env.NUBRA_PYTHON_API_URL?.trim();
-  const serviceKey=process.env.NUBRA_PYTHON_API_KEY?.trim();
-  if(!serviceUrl||!serviceKey) throw new Error('Nubra Python SDK service is not configured. Set NUBRA_PYTHON_API_URL and NUBRA_PYTHON_API_KEY in Vercel.');
-  const result:any[]=[];
-  const base=serviceUrl.replace(/\/$/,'');
-  type Group={exchange:string;type:string;fields:string[];startDate:string;endDate:string;interval:string;intraDay:boolean;realTime:boolean;symbols:string[]};
-  const groups=new Map<string,Group>();
-  for(const q of query){
-    const symbols=Array.isArray(q.values)?q.values.map((x:string)=>String(x).trim().toUpperCase()).filter(Boolean):[];
-    if(!symbols.length) continue;
-    const fields=(Array.isArray(q.fields)?q.fields:['open','high','low','close','volume']).map((x:string)=>x==='volume'?'cumulative_volume':x);
-    const group={exchange:q.exchange??'NSE',type:q.type??'STOCK',fields,startDate:q.startDate,endDate:q.endDate,interval:q.interval??'1d',intraDay:Boolean(q.intraDay),realTime:Boolean(q.realTime),symbols:[] as string[]};
-    const key=JSON.stringify([group.exchange,group.type,group.fields,group.startDate,group.endDate,group.interval,group.intraDay,group.realTime]);
-    const existing=groups.get(key)??group;
-    for(const symbol of symbols) if(!existing.symbols.includes(symbol)) existing.symbols.push(symbol);
-    groups.set(key,existing);
-  }
-  const chunksOf=(items:string[],size:number)=>{const out:string[][]=[];for(let i=0;i<items.length;i+=size)out.push(items.slice(i,i+size));return out;};
-  const requestGroup=async(g:Group,symbols:string[])=>{
-    const response=await fetch(`${base}/v1/history`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-service-key':serviceKey},
-      body:JSON.stringify({
-        exchange:g.exchange,instrument_type:g.type,symbols,fields:g.fields,
-        start_date:g.startDate,end_date:g.endDate,interval:g.interval,
-        intraday:g.intraDay,realtime:g.realTime
-      }),
-      cache:'no-store',signal:AbortSignal.timeout(60000)
-    });
-    const text=await response.text();
-    let payload:any={};
-    try{payload=text?JSON.parse(text):{};}catch{payload={detail:text.slice(0,400)};}
-    if(!response.ok) throw new Error(payload.detail||`Nubra Python SDK HTTP ${response.status}`);
-    const values:any[]=[];
-    for(const symbol of symbols){
-      const series=payload.items?.[symbol.toUpperCase()]??{};
-      const mapped:any={};
-      for(const [field,points] of Object.entries(series) as Array<[string,any[]]>){
-        const outputField=field==='cumulative_volume'?'volume':field;
-        mapped[outputField]=(points??[]).map(point=>({
-          ts:point.timestamp,
-          v:['open','high','low','close','volume'].includes(outputField)?Number(point.value)*100:Number(point.value)
-        }));
-      }
-      if(Object.keys(mapped).length) values.push({[symbol.toUpperCase()]:mapped});
-    }
-    if(values.length) result.push({exchange:g.exchange,type:g.type,values});
-  };
-  for(const group of groups.values()){
-    for(const batch of chunksOf(group.symbols,5)){
-      try{await requestGroup(group,batch);}
-      catch(batchError){
-        if(batch.length===1) throw batchError;
-        for(const symbol of batch){
-          try{await requestGroup(group,[symbol]);}
-          catch(singleError){console.warn(`[Nubra Python SDK] Skipped ${symbol}: ${singleError instanceof Error?singleError.message:String(singleError)}`);}
-        }
-      }
-    }
-  }
-  return {result};
+async function postTimeseries(query:any[], authHeaders:Record<string,string>):Promise<any> {
+  const r=await fetch(`${NUBRA_BASE}/charts/timeseries`,{method:'POST',headers:authHeaders,body:JSON.stringify({query}),cache:'no-store',signal:AbortSignal.timeout(18000)});
+  if(!r.ok) throw new Error(`Nubra timeseries HTTP ${r.status}`); return r.json();
 }
-async function getChain(entry:StockUniverseEntry, _headers:Record<string,string>):Promise<any|null>{
-  const serviceUrl=process.env.NUBRA_PYTHON_API_URL?.trim();
-  const serviceKey=process.env.NUBRA_PYTHON_API_KEY?.trim();
-  if(!serviceUrl||!serviceKey) throw new Error('Nubra Python SDK service is not configured in Vercel.');
+async function getChain(entry:StockUniverseEntry, h:Record<string,string>):Promise<any|null>{
   const exchange=entry.symbol==='SENSEX'?'BSE':'NSE';
-  const base=serviceUrl.replace(/\/$/,'');
-  const fetchChain=async(expiry?:string)=>{
-    const params=new URLSearchParams({instrument:entry.symbol,exchange});
-    if(expiry) params.set('expiry',expiry);
-    const response=await fetch(`${base}/v1/option-chain?${params.toString()}`,{
-      headers:{'x-service-key':serviceKey},cache:'no-store',signal:AbortSignal.timeout(30000)
-    });
-    const body=await response.json().catch(()=>({})) as any;
-    if(!response.ok) throw new Error(body.detail||`Nubra Python option-chain HTTP ${response.status}`);
-    return body;
-  };
-  const initial=await fetchChain();
-  const expiry=getNextMonthlyExpiry(initial.all_expiries??[]);
-  const selected=initial.expiry===expiry?initial:await fetchChain(expiry);
-  const map=(items:any[]) => (items??[]).map(x=>({
-    symbol:x.symbol,
-    sp:num(x.strike_price)??0,
-    ltp:num(x.last_traded_price)??0,
-    oi:num(x.open_interest)??0,
-    ltpchg:num(x.last_traded_price_change)
-  }));
-  return {
-    cp:num(selected.current_price)??0,
-    atm:num(selected.at_the_money_strike)??0,
-    expiry:selected.expiry,
-    all_expiries:selected.all_expiries??[],
-    ce:map(selected.ce),
-    pe:map(selected.pe),
-    underlying_instrument:{ltp:num(selected.current_price)??0}
-  };
+  const base=`${NUBRA_BASE}/optionchains/${encodeURIComponent(entry.symbol)}?exchange=${exchange}`;
+  const first=await fetch(base,{headers:h,cache:'no-store',signal:AbortSignal.timeout(12000)});
+  if(!first.ok)return null; const initial=await first.json() as Chain; if(!initial.chain)return null;
+  const expiry=getNextMonthlyExpiry(initial.chain.all_expiries??[]);
+  if(initial.chain.expiry===expiry)return initial.chain;
+  const selected=await fetch(`${base}&expiry=${expiry}`,{headers:h,cache:'no-store',signal:AbortSignal.timeout(12000)});
+  if(!selected.ok)return null; const result=await selected.json() as Chain; return result.chain??null;
 }
 /**
  * Daily-level watchlist deliberately does not depend on option-chain availability.
@@ -210,13 +85,13 @@ async function getChain(entry:StockUniverseEntry, _headers:Record<string,string>
 /** Shared daily OHLCV loader for scanners. Uses the exact multi-symbol Nubra request
  * and extractBars parser already used by Catch Reversals, avoiding a second REST dialect.
  */
-export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], _brokerToken?:string):Promise<Map<string,DailyBiasBar[]>> {
-  // Historical data is fetched by the separately hosted official Nubra Python SDK service.
-  // Browser OTP tokens are deliberately not passed to the Python SDK process.
-  const h:Record<string,string>={};
+export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], brokerToken?:string):Promise<Map<string,Bar[]>> {
+  const creds=await getNubraCredentialsForSession(brokerToken);
+  if(!creds.authToken) throw new Error('Nubra session credentials are unavailable. Reconnect Nubra.');
+  const h=headers(creds.authToken,creds.deviceId);
   const endDate=`${getIstSessionUtcRange(getLastCompletedWeekdayDate()).nextDay}T00:00:00.000Z`;
   const startDate=new Date(Date.now()-400*24*60*60*1000).toISOString();
-  const output=new Map<string,DailyBiasBar[]>();
+  const output=new Map<string,Bar[]>();
   for(const group of chunks(entries,BATCH_SIZE)){
     const query=group.map(entry=>({
       exchange:entry.symbol==='SENSEX'?'BSE':'NSE',
@@ -225,41 +100,11 @@ export async function fetchDailyBarsForBias(entries:StockUniverseEntry[], _broke
       fields:['open','high','low','close','volume'],
       interval:'1d',intraDay:false,startDate,endDate
     }));
-    let payload:any=null;
-    try {
-      payload=await postTimeseries(query,h);
-    } catch (batchError) {
-      const message=batchError instanceof Error ? batchError.message : String(batchError);
-      // A single unsupported ticker must not discard the other four valid instruments.
-      // Keep authentication/server failures visible; isolate only Nubra's ticker lookup error.
-      if (!/ticker not found/i.test(message)) throw batchError;
-      for (const entry of group) {
-        const singleQuery=[{
-          exchange:entry.symbol==='SENSEX'?'BSE':'NSE',
-          type:entry.isIndex?'INDEX':'STOCK',
-          values:[entry.symbol],
-          fields:['open','high','low','close','volume'],
-          interval:'1d',intraDay:false,startDate,endDate
-        }];
-        try {
-          const singlePayload=await postTimeseries(singleQuery,h);
-          const bars=extractBars(singlePayload,entry.symbol);
-          if(bars.length) output.set(entry.symbol,bars.map(b=>({
-            date:toIstDateString(b.ts),
-            timestamp:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume
-          })));
-        } catch (singleError) {
-          const detail=singleError instanceof Error ? singleError.message : String(singleError);
-          if (/HTTP 440|HTTP 401|HTTP 403|session expired|authentication/i.test(detail)) throw singleError;
-          console.warn(`[Bias MTF] Nubra skipped unsupported ticker ${entry.symbol}: ${detail}`);
-        }
-      }
-      continue;
-    }
+    const payload=await postTimeseries(query,h);
     for(const entry of group){
       const bars=extractBars(payload,entry.symbol);
       if(bars.length) output.set(entry.symbol,bars.map(b=>({
-        date:toIstDateString(b.ts),
+        date:new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}),
         timestamp:b.ts,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume
       })));
     }
@@ -281,7 +126,7 @@ async function fetchDailyWatchlist(entries:StockUniverseEntry[], h:Record<string
     try{data=await postTimeseries(query,h);}catch{continue;}
     for(const entry of group){
       const bars=extractBars(data,entry.symbol)
-        .filter(b=>toIstDateString(b.ts)<=sessionIsoDate);
+        .filter(b=>new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})<=sessionIsoDate);
       if(bars.length<2)continue;
       const latest=bars.at(-1)!;
       const previous=bars.at(-2)!;
@@ -343,7 +188,7 @@ async function fetchGroup(entries:StockUniverseEntry[], h:Record<string,string>,
       const pctFromOpen=(v:any)=>{const opens=v?.open??[],closes=v?.close??[];const first=num(opens[0]?.v),last=num(closes.at(-1)?.v);return first&&last?pct(last/100,first/100):null;};
       const callChange=pctFromOpen(cv),putChange=pctFromOpen(pv);
       const bars=extractBars(data,item.entry.symbol); if(bars.length<30)continue;
-      const completed=bars.filter(b=>toIstDateString(b.ts)<=sessionIsoDate); if(completed.length<25)continue;
+      const completed=bars.filter(b=>new Date(b.ts).toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})<=sessionIsoDate); if(completed.length<25)continue;
       const prev=completed.at(-2)!; const today=completed.at(-1)!; const lv=pivots(prev);
       const spot=item.spot;
       // Daily support/resistance levels are calculated from the previous completed daily candle.
@@ -372,25 +217,21 @@ async function fetchGroup(entries:StockUniverseEntry[], h:Record<string,string>,
   }
   return rows;
 }
-export async function getCatchReversals(_brokerToken?:string){
-  const clock=getNSEMarketClockStatus();
+export async function getCatchReversals(brokerToken?:string){
+  const clock=getNSEMarketClockStatus(); const creds=await getNubraCredentialsForSession(brokerToken);
   const tradingDate=getIstTradingDate(); const sessionDate=getLastCompletedWeekdayDate(); const sessionIsoDate=`${sessionDate.slice(0,4)}-${sessionDate.slice(4,6)}-${sessionDate.slice(6,8)}`; const sessionRange=getIstSessionUtcRange(sessionDate);
   const historyStart=new Date(Date.now()-400*24*60*60*1000).toISOString(); const historyEnd=`${sessionRange.nextDay}T00:00:00.000Z`;
-  const h:Record<string,string>={};
+  if(!creds.authToken) throw new Error('Connect Nubra Finance first to scan live option and market data.');
+  const h=headers(creds.authToken,creds.deviceId);
   const universe=[...NIFTY_500_FNO_UNIVERSE.filter(x=>x.isFno),...INDEX_BASKET_UNIVERSE];
   // Always build the near-level watchlist from daily candles first; it has no option-chain dependency.
   const watchRows=await fetchDailyWatchlist(universe,h,historyStart,historyEnd,sessionIsoDate);
-  // Only request option chains and option-history for instruments already near a
-  // previous-day pivot. This avoids wasting derivative API calls on the full universe.
-  const watchSymbols=new Set(watchRows.map(row=>row.symbol));
-  const candidates=universe.filter(entry=>watchSymbols.has(entry.symbol));
   const confirmedRows:CatchReversalRow[]=[];
-  for(const group of chunks(candidates,BATCH_SIZE)){ confirmedRows.push(...await fetchGroup(group,h,clock.isOpen,sessionRange,historyStart,historyEnd,sessionIsoDate)); }
+  for(const group of chunks(universe,BATCH_SIZE)){ confirmedRows.push(...await fetchGroup(group,h,clock.isOpen,sessionRange,historyStart,historyEnd,sessionIsoDate)); }
   // Confirmed bounce/rejection rows take precedence over watchlist rows for the same instrument.
   const confirmedSymbols=new Set(confirmedRows.map(row=>row.symbol));
   const all=[...confirmedRows,...watchRows.filter(row=>!confirmedSymbols.has(row.symbol))];
   // Expiry is selected per underlying from Nubra's actual monthly contract calendar.
-  const expirySource=await getChain(candidates[0]??universe[0],h);
-  const expiry=expirySource?.expiry??getNextMonthlyExpiry(expirySource?.all_expiries??[]);
+  const firstChain=await getChain(universe[0],h); const expiry=firstChain?.expiry??getNextMonthlyExpiry(firstChain?.all_expiries??[]);
   return {items:all,clock,expiry,tradingDate,batchSize:BATCH_SIZE,universeCount:universe.length,loadedCount:all.length,watchlistCount:watchRows.length,confirmedCount:confirmedRows.length};
 }

@@ -1,6 +1,5 @@
 fastapi==0.115.12
 uvicorn==0.34.2
 nubra-sdk==0.5.5
-pyotp==2.9.0
 pandas==2.2.3
 requests==2.32.4

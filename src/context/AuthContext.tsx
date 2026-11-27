@@ -3,8 +3,6 @@ import type { BrokerSessionInfo, UserProfileDoc } from '../../shared/types';
 
 interface BrokerContextValue {
   brokerSession: BrokerSessionInfo | null;
-  nubraConnected: boolean;
-  setNubraConnected: (connected: boolean) => void;
   brokerToken: string | null;
   clientId: string;
   // Compatibility values for dormant legacy pages; no website authentication is performed.
@@ -39,8 +37,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const clientId = useMemo(() => getClientId(), []);
   const [brokerToken, setBrokerToken] = useState<string | null>(null);
   const [brokerSession, setBrokerSession] = useState<BrokerSessionInfo | null>(null);
-  // SMS OTP-backed Nubra connection is an explicit, per-browser-session action.
-  const [nubraConnected, setNubraConnected] = useState(false);
 
   const setBrokerSessionState = useCallback((token: string | null, session: BrokerSessionInfo | null) => {
     setBrokerToken(token);
@@ -88,7 +84,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }), [setBrokerSessionState]);
 
   return (
-    <BrokerContext.Provider value={{ brokerSession, brokerToken, clientId, nubraConnected, setNubraConnected, ...compatibility, setBrokerSessionState }}>
+    <BrokerContext.Provider value={{ brokerSession, brokerToken, clientId, ...compatibility, setBrokerSessionState }}>
       {children}
     </BrokerContext.Provider>
   );

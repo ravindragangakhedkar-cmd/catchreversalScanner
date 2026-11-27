@@ -59,7 +59,12 @@ export function BrokerConnectPage({ onNavigate }: { onNavigate?: (page: AppPage)
       setChallengeId(null);
       setOtp('');
       setMpin('');
-      setStatusMessage('Nubra connected successfully using SMS OTP and MPIN.');
+      const totpReset = payload.totp_disabled === true
+        ? 'TOTP has also been disabled on the Nubra account.'
+        : payload.totp_disable_error
+          ? `SMS OTP login succeeded, but Nubra did not confirm TOTP deactivation: ${payload.totp_disable_error}`
+          : 'SMS OTP login succeeded; TOTP deactivation was not confirmed.';
+      setStatusMessage(`Nubra connected successfully using SMS OTP and MPIN. ${totpReset}`);
     } catch (error) {
       setErrorMsg(error instanceof Error ? error.message : 'Nubra SMS OTP verification failed.');
     } finally {

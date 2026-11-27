@@ -268,7 +268,25 @@ app.get('/api/nubra/auth-status',async(_req,res)=>{
   try {
     res.setHeader('Cache-Control','no-store');
     res.json(await nubraPythonFetch('/v1/auth-status'));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra TOTP authentication check failed.'}); }
+  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra SMS OTP authentication check failed.'}); }
+});
+
+app.post('/api/nubra/auth/start',async(req,res)=>{
+  try {
+    const body=req.body as {mobile?:string;mpin?:string};
+    if(!body?.mobile||!body?.mpin){res.status(400).json({error:'Registered mobile number and 4-digit MPIN are required.'});return;}
+    res.setHeader('Cache-Control','no-store');
+    res.json(await nubraPythonFetch('/v1/auth/start',{method:'POST',body:JSON.stringify(body)}));
+  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Unable to start Nubra SMS OTP authentication.'}); }
+});
+
+app.post('/api/nubra/auth/verify',async(req,res)=>{
+  try {
+    const body=req.body as {challenge_id?:string;otp?:string};
+    if(!body?.challenge_id||!body?.otp){res.status(400).json({error:'OTP challenge ID and 6-digit SMS OTP are required.'});return;}
+    res.setHeader('Cache-Control','no-store');
+    res.json(await nubraPythonFetch('/v1/auth/verify',{method:'POST',body:JSON.stringify(body)}));
+  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra SMS OTP verification failed.'}); }
 });
 
 app.get('/api/nubra/current-price',async(req,res)=>{

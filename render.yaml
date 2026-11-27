@@ -10,9 +10,5 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
-      - key: NUBRA_PHONE_NO
-        sync: false
-      - key: NUBRA_MPIN
-        sync: false
       - key: SERVICE_API_KEY
         generateValue: true

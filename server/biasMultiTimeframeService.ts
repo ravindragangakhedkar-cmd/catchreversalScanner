@@ -109,7 +109,7 @@ export async function getBiasMultiTimeframe(brokerToken?: string) {
       const last = daily.length - 1;
       const fresh = twin.signals[last];
       // Only publish a Twin Range entry when it agrees with the Daily Market Bias direction.
-      const twinRangeStatus: Row['twinRangeStatus'] = fresh === 'BUY' && dailyTrend === 'Bullish'
+      const twinRangeStatus = fresh === 'BUY' && dailyTrend === 'Bullish'
         ? 'Long'
         : fresh === 'SELL' && dailyTrend === 'Bearish'
           ? 'Short'

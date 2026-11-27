@@ -4,23 +4,27 @@ import builtins
 import csv
 import getpass
 import os
+import queue
 import threading
 import time
+import uuid
 import requests
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
 
-import pyotp
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Catch Reversals Nubra SDK Service", version="1.0.0")
 
 _sdk_lock = threading.RLock()
+_auth_worker_lock = threading.Lock()
 _sdk_client: Any | None = None
 _sdk_created_at = 0.0
 SDK_MAX_AGE_SECONDS = 6 * 60 * 60
+_auth_attempts: dict[str, dict[str, Any]] = {}
+_auth_attempts_lock = threading.RLock()
 
 
 def _required_env(name: str) -> str:
@@ -41,39 +45,70 @@ def _get_sdk():
     with _sdk_lock:
         if _sdk_client is not None and time.time() - _sdk_created_at < SDK_MAX_AGE_SECONDS:
             return _sdk_client
+        _sdk_client = None
+        raise HTTPException(
+            status_code=401,
+            detail="Nubra is not connected. Open Broker Connect and complete SMS OTP plus MPIN verification.",
+        )
 
-        phone = _required_env("NUBRA_PHONE_NO")
-        mpin = _required_env("NUBRA_MPIN")
-        secret = _required_env("NUBRA_TOTP_SECRET")
-        if not secret:
-            raise HTTPException(status_code=503, detail="NUBRA_TOTP_SECRET is not configured.")
 
-        # Nubra's documented headless login method: TOTP + pyotp, with
-        # PHONE_NO and MPIN loaded by the SDK from environment variables.
-        os.environ["PHONE_NO"] = phone
-        os.environ["MPIN"] = mpin
-        totp = pyotp.TOTP(secret)
+def _run_sms_sdk_login(attempt: dict[str, Any]) -> None:
+    global _sdk_client, _sdk_created_at
+    mobile = attempt["mobile"]
+    mpin = attempt["mpin"]
+    otp_queue: queue.Queue[str] = attempt["otp_queue"]
+    otp_requested: threading.Event = attempt["otp_requested"]
+    done: threading.Event = attempt["done"]
+
+    def prompt_value(prompt: str = "") -> str:
+        prompt_text = (prompt or "").lower()
+        if "phone" in prompt_text or "mobile" in prompt_text:
+            return mobile
+        if "mpin" in prompt_text or "pin" in prompt_text:
+            return mpin
+        # With totp_login=False, Nubra's SDK asks for the SMS OTP here.
+        otp_requested.set()
+        try:
+            return otp_queue.get(timeout=240)
+        except queue.Empty as exc:
+            raise RuntimeError("Timed out waiting for the SMS OTP entered in Broker Connect.") from exc
+
+    with _auth_worker_lock:
         original_input = builtins.input
         original_getpass = getpass.getpass
         try:
-            builtins.input = lambda prompt="": totp.now()
-            getpass.getpass = lambda prompt="": totp.now()
+            os.environ["PHONE_NO"] = mobile
+            os.environ["MPIN"] = mpin
+            builtins.input = prompt_value
+            getpass.getpass = prompt_value
             from nubra_python_sdk.start_sdk import InitNubraSdk, NubraEnv
             client = InitNubraSdk(
                 env=NubraEnv.PROD,
-                totp_login=True,
+                totp_login=False,
                 env_creds=True,
             )
+            with _sdk_lock:
+                _sdk_client = client
+                _sdk_created_at = time.time()
+            attempt["result"] = {"authenticated": True, "method": "sms-otp"}
         except Exception as exc:
-            _sdk_client = None
-            raise HTTPException(status_code=502, detail=f"Nubra Python SDK authentication failed: {type(exc).__name__}: {exc}") from exc
+            attempt["error"] = f"{type(exc).__name__}: {exc}"
         finally:
             builtins.input = original_input
             getpass.getpass = original_getpass
+            os.environ.pop("PHONE_NO", None)
+            os.environ.pop("MPIN", None)
+            done.set()
 
-        _sdk_client = client
-        _sdk_created_at = time.time()
-        return _sdk_client
+
+class SmsLoginStart(BaseModel):
+    mobile: str = Field(pattern=r"^[6-9][0-9]{9}$")
+    mpin: str = Field(pattern=r"^[0-9]{4}$")
+
+
+class SmsLoginVerify(BaseModel):
+    challenge_id: str = Field(min_length=16, max_length=80)
+    otp: str = Field(pattern=r"^[0-9]{6}$")
 
 
 def _attr(obj: Any, name: str, default=None):
@@ -149,21 +184,77 @@ def health():
 
 @app.get("/v1/auth-status", dependencies=[Depends(_authorize)])
 def auth_status():
-    """Initialize/reuse the Nubra SDK session and report the result."""
+    """Report whether a manual SMS OTP + MPIN SDK session is active."""
+    with _sdk_lock:
+        authenticated = _sdk_client is not None and time.time() - _sdk_created_at < SDK_MAX_AGE_SECONDS
+    return {
+        "authenticated": authenticated,
+        "method": "sms-otp",
+        "service": "nubra-python-sdk",
+    }
+
+
+@app.post("/v1/auth/start", dependencies=[Depends(_authorize)])
+def auth_start(request: SmsLoginStart):
+    """Start the SDK's normal phone/SMS OTP/MPIN login and wait until it requests the SMS code."""
+    with _sdk_lock:
+        if _sdk_client is not None and time.time() - _sdk_created_at < SDK_MAX_AGE_SECONDS:
+            return {"authenticated": True, "method": "sms-otp", "message": "Nubra is already connected."}
+
+    challenge_id = uuid.uuid4().hex
+    attempt: dict[str, Any] = {
+        "mobile": request.mobile,
+        "mpin": request.mpin,
+        "otp_queue": queue.Queue(maxsize=1),
+        "otp_requested": threading.Event(),
+        "done": threading.Event(),
+        "created_at": time.time(),
+    }
+    with _auth_attempts_lock:
+        _auth_attempts.clear()
+        _auth_attempts[challenge_id] = attempt
+
+    worker = threading.Thread(target=_run_sms_sdk_login, args=(attempt,), daemon=True)
+    attempt["worker"] = worker
+    worker.start()
+
+    if not attempt["otp_requested"].wait(timeout=30):
+        if attempt["done"].is_set():
+            with _auth_attempts_lock:
+                _auth_attempts.pop(challenge_id, None)
+            raise HTTPException(status_code=502, detail=attempt.get("error", "Nubra SDK did not request an SMS OTP."))
+        raise HTTPException(status_code=504, detail="Nubra did not reach the SMS OTP prompt within 30 seconds.")
+
+    return {
+        "challenge_id": challenge_id,
+        "message": f"Nubra requested the SMS OTP for the registered mobile ending {request.mobile[-4:]}.",
+        "method": "sms-otp",
+    }
+
+
+@app.post("/v1/auth/verify", dependencies=[Depends(_authorize)])
+def auth_verify(request: SmsLoginVerify):
+    with _auth_attempts_lock:
+        attempt = _auth_attempts.get(request.challenge_id)
+    if not attempt:
+        raise HTTPException(status_code=404, detail="OTP challenge not found or expired. Start Broker Connect again.")
+    if time.time() - attempt["created_at"] > 240:
+        with _auth_attempts_lock:
+            _auth_attempts.pop(request.challenge_id, None)
+        raise HTTPException(status_code=408, detail="SMS OTP challenge expired. Request a new OTP.")
+
     try:
-        _get_sdk()
-        return {
-            "authenticated": True,
-            "method": "totp",
-            "service": "nubra-python-sdk",
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Nubra authentication check failed: {type(exc).__name__}: {exc}",
-        ) from exc
+        attempt["otp_queue"].put_nowait(request.otp)
+    except queue.Full:
+        raise HTTPException(status_code=409, detail="An OTP was already submitted for this challenge.")
+
+    if not attempt["done"].wait(timeout=60):
+        raise HTTPException(status_code=504, detail="Nubra SDK did not finish OTP and MPIN verification in time.")
+    with _auth_attempts_lock:
+        _auth_attempts.pop(request.challenge_id, None)
+    if attempt.get("error"):
+        raise HTTPException(status_code=502, detail=f"Nubra SMS OTP authentication failed: {attempt['error']}")
+    return {"authenticated": True, "method": "sms-otp", "service": "nubra-python-sdk"}
 
 
 @app.post("/v1/historical", dependencies=[Depends(_authorize)])

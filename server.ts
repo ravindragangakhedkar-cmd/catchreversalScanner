@@ -201,124 +201,29 @@ app.get('/api/market/scan-super-pivots', async (req, res) => {
 app.get('/api/market/scan-bias-mtf', async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    // Bias MTF uses the separately authenticated Nubra Python SDK service.
-    // It does not depend on the browser's REST-session token.
-    res.json(await getBiasMultiTimeframe());
+    const token = extractBrokerToken(req);
+    const session = await getBrokerSessionByToken(token);
+    if (!session?.connected || session.provider !== 'nubra' || !session.nubraLiveAuth) {
+      res.status(401).json({ error: 'Connect a live Nubra Finance session on Broker Connect before running Bias Multi Time Frame.' });
+      return;
+    }
+    res.json(await getBiasMultiTimeframe(token));
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message : 'Bias Multi Time Frame scan failed.' });
   }
 });
 
-// Generic Nubra Python SDK data access: instruments, derivatives history and option chains.
-function nubraPythonConfig() {
-  const base=process.env.NUBRA_PYTHON_API_URL?.trim().replace(/\/$/,'');
-  const key=process.env.NUBRA_PYTHON_API_KEY?.trim();
-  if(!base||!key) throw new Error('Nubra Python SDK service is not configured in Vercel. Set NUBRA_PYTHON_API_URL and NUBRA_PYTHON_API_KEY.');
-  return {base,key};
-}
-async function nubraPythonFetch(path:string,init:RequestInit={}) {
-  const {base,key}=nubraPythonConfig();
-  const response=await fetch(`${base}${path}`,{
-    ...init,
-    headers:{'Content-Type':'application/json','x-service-key':key,...(init.headers??{})},
-    cache:'no-store',
-    signal:AbortSignal.timeout(65000),
-  });
-  const textBody=await response.text();
-  let payload:any;
-  try { payload=textBody?JSON.parse(textBody):{}; } catch { payload={detail:textBody.slice(0,500)}; }
-  if(!response.ok) throw new Error(payload.detail||payload.error||`Python SDK service HTTP ${response.status}`);
-  return payload;
-}
-
-app.get('/api/nubra/instruments',async(req,res)=>{
-  try {
-    const allowed=['exchange','asset','derivative_type','asset_type','expiry','option_type','symbol','limit'];
-    const params=new URLSearchParams();
-    for(const key of allowed){const value=req.query[key];if(typeof value==='string'&&value.trim())params.set(key,value.trim());}
-    res.setHeader('Cache-Control','no-store');
-    res.json(await nubraPythonFetch(`/v1/instruments?${params.toString()}`));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra instrument lookup failed.'}); }
-});
-
-app.post('/api/nubra/history',async(req,res)=>{
-  try {
-    const body=req.body as {exchange?:string;instrument_type?:string;symbols?:string[];fields?:string[];start_date?:string;end_date?:string;interval?:string;intraday?:boolean;realtime?:boolean};
-    if(!body||!Array.isArray(body.symbols)||body.symbols.length<1||body.symbols.length>5){
-      res.status(400).json({error:'Provide between one and five instrument symbols per request.'});return;
-    }
-    if(!['NSE','BSE','MCX'].includes(body.exchange??'NSE')||!['STOCK','INDEX','FUT','OPT'].includes(body.instrument_type??'')){
-      res.status(400).json({error:'Use exchange NSE/BSE/MCX and instrument_type STOCK/INDEX/FUT/OPT.'});return;
-    }
-    res.setHeader('Cache-Control','no-store');
-    res.json(await nubraPythonFetch('/v1/history',{method:'POST',body:JSON.stringify(body)}));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra historical data request failed.'}); }
-});
-
-app.get('/api/nubra/indices',async(req,res)=>{
-  try {
-    const symbol=typeof req.query.symbol==='string'?req.query.symbol.trim():'';
-    const params=new URLSearchParams();if(symbol)params.set('symbol',symbol);
-    res.setHeader('Cache-Control','public, max-age=900');
-    res.json(await nubraPythonFetch(`/v1/indices?${params.toString()}`));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra index master lookup failed.'}); }
-});
-
-app.get('/api/nubra/auth-status',async(_req,res)=>{
-  try {
-    res.setHeader('Cache-Control','no-store');
-    res.json(await nubraPythonFetch('/v1/auth-status'));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra SMS OTP authentication check failed.'}); }
-});
-
-app.post('/api/nubra/auth/start',async(req,res)=>{
-  try {
-    const body=req.body as {mobile?:string;mpin?:string};
-    if(!body?.mobile||!body?.mpin){res.status(400).json({error:'Registered mobile number and 4-digit MPIN are required.'});return;}
-    res.setHeader('Cache-Control','no-store');
-    res.json(await nubraPythonFetch('/v1/auth/start',{method:'POST',body:JSON.stringify(body)}));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Unable to start Nubra SMS OTP authentication.'}); }
-});
-
-app.post('/api/nubra/auth/verify',async(req,res)=>{
-  try {
-    const body=req.body as {challenge_id?:string;otp?:string};
-    if(!body?.challenge_id||!body?.otp){res.status(400).json({error:'OTP challenge ID and 6-digit SMS OTP are required.'});return;}
-    res.setHeader('Cache-Control','no-store');
-    res.json(await nubraPythonFetch('/v1/auth/verify',{method:'POST',body:JSON.stringify(body)}));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra SMS OTP verification failed.'}); }
-});
-
-app.get('/api/nubra/current-price',async(req,res)=>{
-  try {
-    const instrument=typeof req.query.instrument==='string'?req.query.instrument.trim():'';
-    const exchange=typeof req.query.exchange==='string'?req.query.exchange:'NSE';
-    if(!instrument){res.status(400).json({error:'An instrument symbol is required.'});return;}
-    const params=new URLSearchParams({instrument,exchange});
-    res.setHeader('Cache-Control','no-store');
-    res.json(await nubraPythonFetch(`/v1/current-price?${params.toString()}`));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra current-price request failed.'}); }
-});
-
-app.get('/api/nubra/option-chain',async(req,res)=>{
-  try {
-    const instrument=typeof req.query.instrument==='string'?req.query.instrument.trim():'';
-    const exchange=typeof req.query.exchange==='string'?req.query.exchange:'NSE';
-    const expiry=typeof req.query.expiry==='string'?req.query.expiry:'';
-    if(!instrument){res.status(400).json({error:'An underlying instrument is required.'});return;}
-    const params=new URLSearchParams({instrument,exchange});if(expiry)params.set('expiry',expiry);
-    res.setHeader('Cache-Control','no-store');
-    res.json(await nubraPythonFetch(`/v1/option-chain?${params.toString()}`));
-  } catch(err) { res.status(502).json({error:err instanceof Error?err.message:'Nubra option-chain request failed.'}); }
-});
-
 // Catch Reversals — Nubra Finance, dynamic India trading date and next monthly expiry; max five instruments per batch.
-app.get('/api/market/scan-catch-reversals', async (_req, res) => {
+app.get('/api/market/scan-catch-reversals', async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    // All Catch Reversals market data, including the option chain, now uses
-    // the separately authenticated Nubra Python SDK service.
-    res.json(await getCatchReversals());
+    const token = extractBrokerToken(req);
+    const session = await getBrokerSessionByToken(token);
+    if (!session?.connected || session.provider !== 'nubra' || !session.nubraLiveAuth) {
+      res.status(401).json({ error: 'Connect a live Nubra Finance session on Broker Connect before running Catch Reversals.' });
+      return;
+    }
+    res.json(await getCatchReversals(token));
   } catch (err) {
     res.status(502).json({ error: err instanceof Error ? err.message : 'Catch Reversals scan failed.' });
   }

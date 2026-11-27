@@ -87,10 +87,24 @@ def _run_sms_sdk_login(attempt: dict[str, Any]) -> None:
                 totp_login=False,
                 env_creds=True,
             )
+            # Once SMS OTP + MPIN login succeeds, explicitly revert the account
+            # from TOTP to the documented default OTP + MPIN authentication.
+            totp_disabled = False
+            try:
+                client.totp_disable()
+                totp_disabled = True
+            except Exception as disable_exc:
+                # Keep the authenticated market-data session, but surface the
+                # account-level reset result honestly to the user.
+                attempt["totp_disable_error"] = f"{type(disable_exc).__name__}: {disable_exc}"
             with _sdk_lock:
                 _sdk_client = client
                 _sdk_created_at = time.time()
-            attempt["result"] = {"authenticated": True, "method": "sms-otp"}
+            attempt["result"] = {
+                "authenticated": True,
+                "method": "sms-otp",
+                "totp_disabled": totp_disabled,
+            }
         except Exception as exc:
             attempt["error"] = f"{type(exc).__name__}: {exc}"
         finally:
@@ -254,7 +268,13 @@ def auth_verify(request: SmsLoginVerify):
         _auth_attempts.pop(request.challenge_id, None)
     if attempt.get("error"):
         raise HTTPException(status_code=502, detail=f"Nubra SMS OTP authentication failed: {attempt['error']}")
-    return {"authenticated": True, "method": "sms-otp", "service": "nubra-python-sdk"}
+    return {
+        "authenticated": True,
+        "method": "sms-otp",
+        "totp_disabled": bool(attempt.get("result", {}).get("totp_disabled")),
+        "totp_disable_error": attempt.get("totp_disable_error"),
+        "service": "nubra-python-sdk",
+    }
 
 
 @app.post("/v1/historical", dependencies=[Depends(_authorize)])

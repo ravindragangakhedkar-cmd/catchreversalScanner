@@ -39,7 +39,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const clientId = useMemo(() => getClientId(), []);
   const [brokerToken, setBrokerToken] = useState<string | null>(null);
   const [brokerSession, setBrokerSession] = useState<BrokerSessionInfo | null>(null);
-  // TOTP-backed Render connection is an explicit, per-browser-session action.
+  // SMS OTP-backed Nubra connection is an explicit, per-browser-session action.
   const [nubraConnected, setNubraConnected] = useState(false);
 
   const setBrokerSessionState = useCallback((token: string | null, session: BrokerSessionInfo | null) => {
